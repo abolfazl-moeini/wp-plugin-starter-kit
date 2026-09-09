@@ -20,6 +20,10 @@ class Plan3_Transformer {
 	public $class_map    = array();
 	public $constant_map = array();
 	public $class_kinds  = array();
+	public $scoped_function_map   = array();
+	public $global_function_map   = array();
+	public $function_declarations = array();
+	protected $short_func_counts  = array();
 
 	protected static $reserved_vars = array(
 		'$this',
@@ -64,6 +68,24 @@ class Plan3_Transformer {
 		'$typenow',
 		'$taxnow',
 		'$authordata',
+		'$args',
+		'$messages',
+		'$message',
+		'$data',
+		'$content',
+		'$rows',
+		'$product_id',
+		'$is_logged_in',
+		'$owns',
+		'$total_lessons',
+		'$test',
+		'$result',
+		'$submission',
+		'$answers',
+		'$user_name',
+		'$date_formatted',
+		'$font_url',
+		'$is_pdf',
 	);
 
 	protected static $reserved_funcs = array(
@@ -466,7 +488,175 @@ class Plan3_Transformer {
 		return false;
 	}
 
+	protected function is_gettext_string( $tokens, $i ) {
+		$p = $this->prev_code_index( $tokens, $i );
+		if ( $p < 0 || ! is_string( $tokens[ $p ] ) || ( $tokens[ $p ] !== '(' && $tokens[ $p ] !== ',' ) ) {
+			return false;
+		}
+		while ( $p >= 0 && is_string( $tokens[ $p ] ) && $tokens[ $p ] !== '(' ) {
+			$p = $this->prev_code_index( $tokens, $p );
+		}
+		if ( $p < 0 || ! is_string( $tokens[ $p ] ) || $tokens[ $p ] !== '(' ) {
+			return false;
+		}
+		$fn_idx = $this->prev_code_index( $tokens, $p );
+		if ( $fn_idx < 0 ) return false;
+		$fn_name = strtolower( $this->token_function_name( $tokens[ $fn_idx ] ) );
+		$gettext_funcs = array( '__', '_e', '_x', 'esc_html__', 'esc_html_e', 'esc_html_x', 'esc_attr__', 'esc_attr_e', 'esc_attr_x', '_n', '_nx' );
+		return in_array( $fn_name, $gettext_funcs, true );
+	}
+
+	protected function is_array_key_string( $tokens, $i, $count ) {
+		$next = $i + 1;
+		while ( $next < $count && is_array( $tokens[ $next ] ) && $tokens[ $next ][0] === T_WHITESPACE ) {
+			$next++;
+		}
+		return ( $next < $count && is_array( $tokens[ $next ] ) && $tokens[ $next ][0] === T_DOUBLE_ARROW );
+	}
+
+	protected function is_reflection_or_instantiation_string( $tokens, $i ) {
+		$p = $this->prev_code_index( $tokens, $i );
+		if ( $p < 0 ) return false;
+		if ( is_array( $tokens[ $p ] ) && $tokens[ $p ][0] === T_NEW ) {
+			return true;
+		}
+		if ( is_string( $tokens[ $p ] ) && $tokens[ $p ] === '(' ) {
+			$fn_idx = $this->prev_code_index( $tokens, $p );
+			if ( $fn_idx >= 0 ) {
+				$fn_name = strtolower( $this->token_function_name( $tokens[ $fn_idx ] ) );
+				$reflection_funcs = array( 'class_exists', 'interface_exists', 'trait_exists', 'is_a', 'is_subclass_of', 'is_of_class' );
+				return in_array( $fn_name, $reflection_funcs, true );
+			}
+		}
+		return false;
+	}
+
+	protected function is_callback_argument_string( $tokens, $i ) {
+		$p = $this->prev_code_index( $tokens, $i );
+		if ( $p < 0 || ! is_string( $tokens[ $p ] ) || ( $tokens[ $p ] !== '(' && $tokens[ $p ] !== ',' ) ) {
+			return false;
+		}
+		$depth = 0;
+		while ( $p >= 0 ) {
+			if ( is_string( $tokens[ $p ] ) ) {
+				if ( $tokens[ $p ] === ')' ) {
+					$depth++;
+				} elseif ( $tokens[ $p ] === '(' ) {
+					if ( $depth === 0 ) {
+						break;
+					}
+					$depth--;
+				}
+			}
+			$p = $this->prev_code_index( $tokens, $p );
+		}
+		if ( $p < 0 || ! is_string( $tokens[ $p ] ) || $tokens[ $p ] !== '(' ) return false;
+		$fn_idx = $this->prev_code_index( $tokens, $p );
+		if ( $fn_idx < 0 ) return false;
+		$fn_name = strtolower( $this->token_function_name( $tokens[ $fn_idx ] ) );
+		$callback_callers = array( 'call_user_func', 'call_user_func_array', 'add_action', 'add_filter', 'register_activation_hook', 'register_deactivation_hook', 'function_exists', 'has_action', 'has_filter', 'remove_action', 'remove_filter' );
+		return in_array( $fn_name, $callback_callers, true );
+	}
+
+	protected function is_array_subscript_string( $tokens, $i ) {
+		$p = $this->prev_code_index( $tokens, $i );
+		return ( $p >= 0 && is_string( $tokens[ $p ] ) && $tokens[ $p ] === '[' );
+	}
+
+	protected function record_short_function_name( $func_name, $mangled ) {
+		$key = strtolower( $func_name );
+		if ( ! isset( $this->short_func_counts[ $key ] ) ) {
+			$this->short_func_counts[ $key ] = 0;
+		}
+		$this->short_func_counts[ $key ]++;
+		if ( $this->short_func_counts[ $key ] === 1 ) {
+			$this->function_map[ $func_name ] = $mangled;
+			$this->function_map[ '\\' . $func_name ] = '\\' . $mangled;
+		} else {
+			unset( $this->function_map[ $func_name ] );
+			unset( $this->function_map[ '\\' . $func_name ] );
+		}
+	}
+
+	public function resolve_function_name( $name, $current_namespace = '', $file_use_func_map = array() ) {
+		$clean = ltrim( $name, '\\' );
+		$lower_clean = strtolower( $clean );
+
+		if ( isset( $file_use_func_map[ $lower_clean ] ) ) {
+			$target_fqfn = $file_use_func_map[ $lower_clean ];
+			if ( isset( $this->function_map[ $target_fqfn ] ) ) {
+				return $this->function_map[ $target_fqfn ];
+			}
+			if ( isset( $this->function_map[ '\\' . $target_fqfn ] ) ) {
+				return ltrim( $this->function_map[ '\\' . $target_fqfn ], '\\' );
+			}
+		}
+
+		if ( ! empty( $current_namespace ) && isset( $this->scoped_function_map[ $current_namespace ][ $lower_clean ] ) ) {
+			return $this->scoped_function_map[ $current_namespace ][ $lower_clean ];
+		}
+
+		if ( strpos( $clean, '\\' ) !== false ) {
+			if ( isset( $this->function_map[ $clean ] ) ) {
+				return $this->function_map[ $clean ];
+			}
+			if ( isset( $this->function_map[ '\\' . $clean ] ) ) {
+				return ltrim( $this->function_map[ '\\' . $clean ], '\\' );
+			}
+			$last_slash = strrpos( $clean, '\\' );
+			$ns = substr( $clean, 0, $last_slash );
+			$short = strtolower( substr( $clean, $last_slash + 1 ) );
+			if ( isset( $this->scoped_function_map[ $ns ][ $short ] ) ) {
+				return $this->scoped_function_map[ $ns ][ $short ];
+			}
+		}
+
+		if ( isset( $this->global_function_map[ $lower_clean ] ) ) {
+			return $this->global_function_map[ $lower_clean ];
+		}
+
+		if ( isset( $this->function_map[ $clean ] ) ) {
+			return $this->function_map[ $clean ];
+		}
+		if ( isset( $this->function_map[ '\\' . $clean ] ) ) {
+			return ltrim( $this->function_map[ '\\' . $clean ], '\\' );
+		}
+
+		return null;
+	}
+
+	public function load_map_from_array( $loaded ) {
+		$this->class_map    = isset( $loaded['classes'] ) && is_array( $loaded['classes'] ) ? $loaded['classes'] : array();
+		$this->function_map = isset( $loaded['functions'] ) && is_array( $loaded['functions'] ) ? $loaded['functions'] : array();
+		$this->constant_map = isset( $loaded['constants'] ) && is_array( $loaded['constants'] ) ? $loaded['constants'] : array();
+		$this->class_kinds  = isset( $loaded['kinds'] ) && is_array( $loaded['kinds'] ) ? $loaded['kinds'] : array();
+
+		$this->scoped_function_map = array();
+		$this->global_function_map = array();
+		foreach ( $this->function_map as $sym => $mangled ) {
+			if ( substr( $sym, 0, 1 ) === '\\' ) {
+				continue;
+			}
+			$clean_mangled = ltrim( $mangled, '\\' );
+			if ( strpos( $sym, '\\' ) !== false ) {
+				$last_slash = strrpos( $sym, '\\' );
+				$ns = substr( $sym, 0, $last_slash );
+				$short = strtolower( substr( $sym, $last_slash + 1 ) );
+				$this->scoped_function_map[ $ns ][ $short ] = $clean_mangled;
+			} else {
+				$this->global_function_map[ strtolower( $sym ) ] = $clean_mangled;
+			}
+		}
+	}
+
 	protected function try_rewrite_compact_call( $tokens, $i, $count ) {
+		$p = $this->prev_code_index( $tokens, $i );
+		if ( $p >= 0 && is_array( $tokens[ $p ] ) ) {
+			$prev_id = $tokens[ $p ][0];
+			if ( $prev_id === T_OBJECT_OPERATOR || ( defined( 'T_NULLSAFE_OBJECT_OPERATOR' ) && $prev_id === T_NULLSAFE_OBJECT_OPERATOR ) || $prev_id === T_DOUBLE_COLON || $prev_id === T_FUNCTION ) {
+				return null;
+			}
+		}
 		$j = $i + 1;
 		while ( $j < $count && is_array( $tokens[ $j ] ) && $tokens[ $j ][0] === T_WHITESPACE ) {
 			$j++;
@@ -539,6 +729,8 @@ class Plan3_Transformer {
 
 	public function scan_symbols_in_dir( $dir ) {
 		$this->ambiguous_short_names = array();
+		$this->short_func_counts     = array();
+		$this->function_declarations = array();
 		$it = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $dir, RecursiveDirectoryIterator::SKIP_DOTS ) );
 		foreach ( $it as $file ) {
 			$pathname = str_replace( '\\', '/', $file->getPathname() );
@@ -552,7 +744,10 @@ class Plan3_Transformer {
 	}
 
 	public function scan_file_symbols( $file_path ) {
-		$source = file_get_contents( $file_path );
+		$source = @file_get_contents( $file_path );
+		if ( $source === false ) {
+			return;
+		}
 		$tokens = token_get_all( $source );
 		$count  = count( $tokens );
 
@@ -666,8 +861,37 @@ class Plan3_Transformer {
 							if ( strpos( $func_name, 'wpdev_' ) === 0 || strpos( $func_name, '_wpdev_' ) === 0 || strpos( $func_name, 'tavangary_' ) === 0 ) {
 								continue;
 							}
-							if ( ! in_array( $func_name, self::$reserved_funcs, true ) && ! isset( $this->function_map[ $func_name ] ) ) {
-								$this->function_map[ $func_name ] = '_f_' . substr( hash( 'sha256', $this->seed . ':func:' . $func_name ), 0, 8 );
+							if ( in_array( strtolower( $func_name ), array_map( 'strtolower', self::$reserved_funcs ), true ) ) {
+								continue;
+							}
+							$fqfn = ! empty( $current_namespace ) ? ( $current_namespace . '\\' . $func_name ) : $func_name;
+							$this->function_declarations[] = array(
+								'fqfn'      => $fqfn,
+								'namespace' => $current_namespace,
+								'name'      => $func_name,
+								'file'      => $file_path,
+							);
+							$mangled = '_f_' . substr( hash( 'sha256', $this->seed . ':func:' . strtolower( $fqfn ) ), 0, 8 );
+
+							if ( $this->flatten_namespaces ) {
+								$this->record_short_function_name( $func_name, $mangled );
+								if ( ! empty( $current_namespace ) ) {
+									$this->function_map[ $fqfn ] = $mangled;
+									$this->function_map[ '\\' . $fqfn ] = '\\' . $mangled;
+									$this->scoped_function_map[ $current_namespace ][ strtolower( $func_name ) ] = $mangled;
+								} else {
+									$this->global_function_map[ strtolower( $func_name ) ] = $mangled;
+								}
+							} else {
+								if ( ! empty( $current_namespace ) ) {
+									$this->function_map[ $fqfn ] = $current_namespace . '\\' . $mangled;
+									$this->function_map[ '\\' . $fqfn ] = '\\' . $current_namespace . '\\' . $mangled;
+									$this->scoped_function_map[ $current_namespace ][ strtolower( $func_name ) ] = $mangled;
+								} else {
+									$this->function_map[ $func_name ] = $mangled;
+									$this->function_map[ '\\' . $func_name ] = '\\' . $mangled;
+									$this->global_function_map[ strtolower( $func_name ) ] = $mangled;
+								}
 							}
 						}
 					}
@@ -684,128 +908,195 @@ class Plan3_Transformer {
 		$private_properties = array();
 		$private_constants  = array();
 		$public_properties  = array();
-		$renamed_symbols    = array();
-		$current_namespace  = '';
+		$renamed_symbols           = array();
+		$declared_functions_in_file = array();
+		$current_namespace         = '';
 		$is_view_file       = ( strpos( str_replace( '\\', '/', (string) $file_rel_path ), 'views/' ) !== false || strpos( str_replace( '\\', '/', (string) $file_rel_path ), 'templates/' ) !== false );
 
-		// Pass 1: Discover strictly private methods, properties, and constants in this file
+		$preserved_vars   = array();
+		$dynamic_scopes   = array();
+		$token_scopes     = array();
+		$scope_stack      = array( 0 );
+		$current_scope_id = 0;
+		$next_scope_id    = 1;
+		$pending_scope_id = null;
+
+		// Pass 1: Discover strictly private methods, properties, and constants in this file,
+		// and track scopes with dynamic variable introspection.
 		for ( $i = 0; $i < $count; $i++ ) {
 			$token = $tokens[ $i ];
-			if ( is_array( $token ) ) {
-				$id = $token[0];
-
-				if ( $id === T_NAMESPACE ) {
-					$prev = $i - 1;
-					while ( $prev >= 0 && is_array( $tokens[ $prev ] ) && $tokens[ $prev ][0] === T_WHITESPACE ) {
-						$prev--;
+			if ( is_string( $token ) ) {
+				if ( $token === '{' ) {
+					if ( $pending_scope_id !== null ) {
+						array_push( $scope_stack, $pending_scope_id );
+						$current_scope_id = $pending_scope_id;
+						$pending_scope_id = null;
+					} else {
+						array_push( $scope_stack, $current_scope_id );
 					}
-					$is_double_colon = ( $prev >= 0 && is_array( $tokens[ $prev ] ) && $tokens[ $prev ][0] === T_DOUBLE_COLON );
-
-					if ( ! $is_double_colon ) {
-						$spec = $this->read_namespace_spec( $tokens, $i, $count );
-						$current_namespace = $spec['name'];
+				} elseif ( $token === '}' ) {
+					if ( count( $scope_stack ) > 1 ) {
+						array_pop( $scope_stack );
+						$current_scope_id = end( $scope_stack );
 					}
-				} elseif ( $id === T_PRIVATE ) {
-					$j = $i + 1;
-					$is_function = false;
-					$is_const    = false;
-					$func_name   = '';
-					$prop_names  = array();
-					$const_names = array();
+				} elseif ( $token === ';' && $pending_scope_id !== null ) {
+					$pending_scope_id = null;
+				}
+				$token_scopes[ $i ] = ( $pending_scope_id !== null ) ? $pending_scope_id : $current_scope_id;
+				continue;
+			}
 
-					while ( $j < $count && ( ! is_string( $tokens[ $j ] ) || ( $tokens[ $j ] !== ';' && $tokens[ $j ] !== '{' ) ) ) {
-						if ( is_array( $tokens[ $j ] ) ) {
-							if ( $tokens[ $j ][0] === T_FUNCTION ) {
-								$is_function = true;
-								$k = $j + 1;
-								while ( $k < $count && is_array( $tokens[ $k ] ) && $tokens[ $k ][0] === T_WHITESPACE ) {
-									$k++;
-								}
-								if ( $k < $count && is_array( $tokens[ $k ] ) && $tokens[ $k ][0] === T_STRING ) {
-									$func_name = $tokens[ $k ][1];
-								}
-								break;
-							} elseif ( $tokens[ $j ][0] === T_CONST ) {
-								$is_const = true;
-								$k = $j + 1;
-								$in_val = false;
-								$bracket_depth = 0;
+			$id = $token[0];
+			$token_scopes[ $i ] = ( $pending_scope_id !== null ) ? $pending_scope_id : $current_scope_id;
 
-								while ( $k < $count && ( ! is_string( $tokens[ $k ] ) || ( $tokens[ $k ] !== ';' && $tokens[ $k ] !== '{' ) || $bracket_depth > 0 ) ) {
-									$tk = $tokens[ $k ];
-									if ( is_string( $tk ) ) {
-										if ( $tk === '[' || $tk === '(' ) {
-											$bracket_depth++;
-										} elseif ( $tk === ']' || $tk === ')' ) {
-											$bracket_depth--;
-										} elseif ( $tk === '=' && $bracket_depth === 0 ) {
-											$in_val = true;
-										} elseif ( $tk === ',' && $bracket_depth === 0 ) {
-											$in_val = false;
-										} elseif ( $tk === ';' && $bracket_depth === 0 ) {
-											break;
-										}
-									} elseif ( is_array( $tk ) ) {
-										if ( ! $in_val && $bracket_depth === 0 && $tk[0] === T_STRING ) {
-											$const_names[] = $tk[1];
-										}
+			if ( $id === T_FUNCTION || ( defined( 'T_FN' ) && $id === T_FN ) ) {
+				$pending_scope_id = $next_scope_id++;
+			} elseif ( $id === T_GLOBAL ) {
+				$k = $i + 1;
+				while ( $k < $count && ( ! is_string( $tokens[ $k ] ) || $tokens[ $k ] !== ';' ) ) {
+					if ( is_array( $tokens[ $k ] ) && $tokens[ $k ][0] === T_VARIABLE ) {
+						$preserved_vars[ $tokens[ $k ][1] ] = true;
+					}
+					$k++;
+				}
+			} elseif ( $id === T_STRING && strtolower( $token[1] ) === 'extract' ) {
+				$p = $this->prev_code_index( $tokens, $i );
+				$is_method = ( $p >= 0 && is_array( $tokens[ $p ] ) && in_array( $tokens[ $p ][0], array( T_OBJECT_OPERATOR, defined( 'T_NULLSAFE_OBJECT_OPERATOR' ) ? T_NULLSAFE_OBJECT_OPERATOR : -1, T_DOUBLE_COLON ), true ) );
+				if ( ! $is_method ) {
+					$dynamic_scopes[ $current_scope_id ] = true;
+				}
+			} elseif ( $id === T_STRING && strtolower( $token[1] ) === 'compact' ) {
+				$p = $this->prev_code_index( $tokens, $i );
+				$is_method = ( $p >= 0 && is_array( $tokens[ $p ] ) && in_array( $tokens[ $p ][0], array( T_OBJECT_OPERATOR, defined( 'T_NULLSAFE_OBJECT_OPERATOR' ) ? T_NULLSAFE_OBJECT_OPERATOR : -1, T_DOUBLE_COLON ), true ) );
+				if ( ! $is_method ) {
+					$compact_check = $this->try_rewrite_compact_call( $tokens, $i, $count );
+					if ( $compact_check === null ) {
+						$dynamic_scopes[ $current_scope_id ] = true;
+					}
+				}
+			} elseif ( $id === T_VARIABLE && $token[1] === '$GLOBALS' ) {
+				$dynamic_scopes[ $current_scope_id ] = true;
+			} elseif ( $id === T_VARIABLE ) {
+				$p = $this->prev_code_index( $tokens, $i );
+				if ( $p >= 0 && is_string( $tokens[ $p ] ) && $tokens[ $p ] === '$' ) {
+					$dynamic_scopes[ $current_scope_id ] = true;
+				}
+			} elseif ( defined( 'T_DOLLAR_OPEN_CURLY_BRACES' ) && $id === T_DOLLAR_OPEN_CURLY_BRACES ) {
+				$dynamic_scopes[ $current_scope_id ] = true;
+			}
+
+			if ( $id === T_NAMESPACE ) {
+				$prev = $i - 1;
+				while ( $prev >= 0 && is_array( $tokens[ $prev ] ) && $tokens[ $prev ][0] === T_WHITESPACE ) {
+					$prev--;
+				}
+				$is_double_colon = ( $prev >= 0 && is_array( $tokens[ $prev ] ) && $tokens[ $prev ][0] === T_DOUBLE_COLON );
+
+				if ( ! $is_double_colon ) {
+					$spec = $this->read_namespace_spec( $tokens, $i, $count );
+					$current_namespace = $spec['name'];
+				}
+			} elseif ( $id === T_PRIVATE ) {
+				$j = $i + 1;
+				$is_function = false;
+				$is_const    = false;
+				$func_name   = '';
+				$prop_names  = array();
+				$const_names = array();
+
+				while ( $j < $count && ( ! is_string( $tokens[ $j ] ) || ( $tokens[ $j ] !== ';' && $tokens[ $j ] !== '{' ) ) ) {
+					if ( is_array( $tokens[ $j ] ) ) {
+						if ( $tokens[ $j ][0] === T_FUNCTION ) {
+							$is_function = true;
+							$k = $j + 1;
+							while ( $k < $count && is_array( $tokens[ $k ] ) && $tokens[ $k ][0] === T_WHITESPACE ) {
+								$k++;
+							}
+							if ( $k < $count && is_array( $tokens[ $k ] ) && $tokens[ $k ][0] === T_STRING ) {
+								$func_name = $tokens[ $k ][1];
+							}
+							break;
+						} elseif ( $tokens[ $j ][0] === T_CONST ) {
+							$is_const = true;
+							$k = $j + 1;
+							$in_val = false;
+							$bracket_depth = 0;
+
+							while ( $k < $count && ( ! is_string( $tokens[ $k ] ) || ( $tokens[ $k ] !== ';' && $tokens[ $k ] !== '{' ) || $bracket_depth > 0 ) ) {
+								$tk = $tokens[ $k ];
+								if ( is_string( $tk ) ) {
+									if ( $tk === '[' || $tk === '(' ) {
+										$bracket_depth++;
+									} elseif ( $tk === ']' || $tk === ')' ) {
+										$bracket_depth--;
+									} elseif ( $tk === '=' && $bracket_depth === 0 ) {
+										$in_val = true;
+									} elseif ( $tk === ',' && $bracket_depth === 0 ) {
+										$in_val = false;
+									} elseif ( $tk === ';' && $bracket_depth === 0 ) {
+										break;
 									}
-									$k++;
+								} elseif ( is_array( $tk ) ) {
+									if ( ! $in_val && $bracket_depth === 0 && $tk[0] === T_STRING ) {
+										$const_names[] = $tk[1];
+									}
 								}
-								break;
-							} elseif ( $tokens[ $j ][0] === T_VARIABLE ) {
-								$prop_names[] = substr( $tokens[ $j ][1], 1 );
+								$k++;
 							}
-						}
-						$j++;
-					}
-
-					if ( $is_function && ! empty( $func_name ) ) {
-						if ( ! in_array( $func_name, self::$magic_methods, true ) ) {
-							$mangled = '_m_' . substr( hash( 'sha256', $this->seed . ':m:' . $func_name ), 0, 8 );
-							$private_methods[ $func_name ] = $mangled;
-							$renamed_symbols[] = array( 'type' => 'private_method', 'original' => $func_name, 'mangled' => $mangled );
-						}
-					} elseif ( $is_const && ! empty( $const_names ) ) {
-						foreach ( $const_names as $c_name ) {
-							$mangled = '_k_' . substr( hash( 'sha256', $this->seed . ':k:' . $c_name ), 0, 8 );
-							$private_constants[ $c_name ] = $mangled;
-							$renamed_symbols[] = array( 'type' => 'private_constant', 'original' => $c_name, 'mangled' => $mangled );
-						}
-					} elseif ( ! empty( $prop_names ) ) {
-						foreach ( $prop_names as $prop_name ) {
-							$mangled = '_p_' . substr( hash( 'sha256', $this->seed . ':p:' . $prop_name ), 0, 8 );
-							$private_properties[ $prop_name ] = $mangled;
-							$renamed_symbols[] = array( 'type' => 'private_property', 'original' => $prop_name, 'mangled' => $mangled );
+							break;
+						} elseif ( $tokens[ $j ][0] === T_VARIABLE ) {
+							$prop_names[] = substr( $tokens[ $j ][1], 1 );
 						}
 					}
-				} elseif ( $id === T_PUBLIC || $id === T_PROTECTED || $id === T_VAR || $id === T_STATIC ) {
-					$j = $i + 1;
-					$is_function = false;
-					$prop_names = array();
+					$j++;
+				}
 
-					while ( $j < $count && ( ! is_string( $tokens[ $j ] ) || ( $tokens[ $j ] !== ';' && $tokens[ $j ] !== '{' ) ) ) {
-						if ( is_array( $tokens[ $j ] ) ) {
-							if ( $tokens[ $j ][0] === T_FUNCTION ) {
-								$is_function = true;
-								break;
-							} elseif ( $tokens[ $j ][0] === T_VARIABLE ) {
-								$prop_names[] = substr( $tokens[ $j ][1], 1 );
-							}
-						}
-						$j++;
+				if ( $is_function && ! empty( $func_name ) ) {
+					if ( ! in_array( $func_name, self::$magic_methods, true ) ) {
+						$mangled = '_m_' . substr( hash( 'sha256', $this->seed . ':m:' . $func_name ), 0, 8 );
+						$private_methods[ $func_name ] = $mangled;
+						$renamed_symbols[] = array( 'type' => 'private_method', 'original' => $func_name, 'mangled' => $mangled );
 					}
+				} elseif ( $is_const && ! empty( $const_names ) ) {
+					foreach ( $const_names as $c_name ) {
+						$mangled = '_k_' . substr( hash( 'sha256', $this->seed . ':k:' . $c_name ), 0, 8 );
+						$private_constants[ $c_name ] = $mangled;
+						$renamed_symbols[] = array( 'type' => 'private_constant', 'original' => $c_name, 'mangled' => $mangled );
+					}
+				} elseif ( ! empty( $prop_names ) ) {
+					foreach ( $prop_names as $prop_name ) {
+						$mangled = '_p_' . substr( hash( 'sha256', $this->seed . ':p:' . $prop_name ), 0, 8 );
+						$private_properties[ $prop_name ] = $mangled;
+						$renamed_symbols[] = array( 'type' => 'private_property', 'original' => $prop_name, 'mangled' => $mangled );
+					}
+				}
+			} elseif ( $id === T_PUBLIC || $id === T_PROTECTED || $id === T_VAR || $id === T_STATIC ) {
+				$j = $i + 1;
+				$is_function = false;
+				$prop_names = array();
 
-					if ( ! $is_function && ! empty( $prop_names ) ) {
-						foreach ( $prop_names as $prop_name ) {
-							$public_properties[ $prop_name ] = true;
+				while ( $j < $count && ( ! is_string( $tokens[ $j ] ) || ( $tokens[ $j ] !== ';' && $tokens[ $j ] !== '{' ) ) ) {
+					if ( is_array( $tokens[ $j ] ) ) {
+						if ( $tokens[ $j ][0] === T_FUNCTION ) {
+							$is_function = true;
+							break;
+						} elseif ( $tokens[ $j ][0] === T_VARIABLE ) {
+							$prop_names[] = substr( $tokens[ $j ][1], 1 );
 						}
+					}
+					$j++;
+				}
+
+				if ( ! $is_function && ! empty( $prop_names ) ) {
+					foreach ( $prop_names as $prop_name ) {
+						$public_properties[ $prop_name ] = true;
 					}
 				}
 			}
 		}
 
 		$file_use_map = array();
+		$file_use_func_map = array();
 		for ( $i = 0; $i < $count; $i++ ) {
 			$token = $tokens[ $i ];
 			if ( is_array( $token ) && $token[0] === T_USE ) {
@@ -828,7 +1119,11 @@ class Plan3_Transformer {
 					$clauses = explode( ',', $use_str );
 					foreach ( $clauses as $clause ) {
 						$clause = trim( $clause );
-						if ( preg_match( '/^\\\\?([a-zA-Z0-9_\\\\]+)(?:\\s+as\\s+([a-zA-Z0-9_]+))?$/i', $clause, $m ) ) {
+						if ( preg_match( '/^function\s+\\\\?([a-zA-Z0-9_\\\\]+)(?:\\s+as\\s+([a-zA-Z0-9_]+))?$/i', $clause, $m ) ) {
+							$fqfn = ltrim( $m[1], '\\' );
+							$short_alias = isset( $m[2] ) && ! empty( $m[2] ) ? $m[2] : substr( strrchr( '\\' . $fqfn, '\\' ), 1 );
+							$file_use_func_map[ strtolower( $short_alias ) ] = $fqfn;
+						} elseif ( preg_match( '/^\\\\?([a-zA-Z0-9_\\\\]+)(?:\\s+as\\s+([a-zA-Z0-9_]+))?$/i', $clause, $m ) ) {
 							$fqcn = ltrim( $m[1], '\\' );
 							$short_alias = isset( $m[2] ) && ! empty( $m[2] ) ? $m[2] : substr( strrchr( '\\' . $fqcn, '\\' ), 1 );
 							$file_use_map[ $short_alias ] = $fqcn;
@@ -1178,11 +1473,16 @@ class Plan3_Transformer {
 					continue;
 				}
 
-				// 4. Qualified Class Name Mangling (e.g. TavangaryTheme\ThemeOptions\Sections\Register, Admin\UserPurchaseFilterPage)
+				// 4. Qualified Class / Function Name Mangling (e.g. TavangaryTheme\ThemeOptions\Sections\Register, Admin\UserPurchaseFilterPage)
 				if ( defined( 'T_NAME_FULLY_QUALIFIED' ) && $id === T_NAME_FULLY_QUALIFIED ) {
 					$clean = ltrim( $text, '\\' );
 					if ( isset( $this->class_map[ $clean ] ) ) {
 						$output .= '\\' . $this->class_map[ $clean ];
+						continue;
+					}
+					$func_target = $this->resolve_function_name( $clean, '', $file_use_func_map );
+					if ( $func_target !== null ) {
+						$output .= ( $this->flatten_namespaces ? '' : '\\' ) . $func_target;
 						continue;
 					}
 				}
@@ -1221,6 +1521,12 @@ class Plan3_Transformer {
 						}
 						continue;
 					}
+
+					$func_target = $this->resolve_function_name( $text, $current_namespace, $file_use_func_map );
+					if ( $func_target !== null ) {
+						$output .= ( $this->flatten_namespaces ? '' : ( ! empty( $current_namespace ) ? '' : '\\' ) ) . $func_target;
+						continue;
+					}
 				}
 
 				// 5. Standalone Class / Function Name Mangling
@@ -1250,48 +1556,68 @@ class Plan3_Transformer {
 						// Public/protected method names must keep their contract.
 						// Private method declarations are rewritten in section 10.
 					} else {
-					if ( ! $is_declaration && isset( $file_use_map[ $text ] ) ) {
-						if ( isset( $this->class_map[ $file_use_map[ $text ] ] ) ) {
-							$target = $this->class_map[ $file_use_map[ $text ] ];
-							$output .= ( $this->flatten_namespaces && ! empty( $current_namespace ) ) ? ( '\\' . $target ) : $target;
-							continue;
-						} else {
-							$output .= '\\' . $file_use_map[ $text ];
-							continue;
-						}
-					}
-					if ( ! empty( $current_namespace ) && isset( $this->class_map[ $current_namespace . '\\' . $text ] ) ) {
-						$target = $this->class_map[ $current_namespace . '\\' . $text ];
-						if ( $decl_type === T_CLASS || $decl_type === T_INTERFACE || $decl_type === T_TRAIT || ( defined( 'T_ENUM' ) && $decl_type === T_ENUM ) ) {
-							$declared_classes_in_file[ $current_namespace . '\\' . $text ] = array(
-								'mangled' => $target,
-								'type'    => $decl_type,
-							);
-						}
-						if ( $this->flatten_namespaces ) {
-							$output .= ( $is_declaration || empty( $current_namespace ) ) ? $target : ( '\\' . $target );
-						} else {
-							if ( strncmp( $target, $current_namespace . '\\', strlen( $current_namespace ) + 1 ) === 0 ) {
-								$output .= substr( $target, strlen( $current_namespace ) + 1 );
-							} else {
-								$output .= $target;
+						if ( $decl_type === T_FUNCTION && ! $is_method_declaration ) {
+							$func_target = $this->resolve_function_name( $text, $current_namespace, $file_use_func_map );
+							if ( $func_target !== null ) {
+								$fqfn = ! empty( $current_namespace ) ? ( $current_namespace . '\\' . $text ) : $text;
+								$declared_functions_in_file[] = array(
+									'fqfn'      => $fqfn,
+									'namespace' => $current_namespace,
+									'name'      => $text,
+									'mangled'   => $func_target,
+								);
+								$output .= $func_target;
+								continue;
 							}
 						}
-						continue;
-					}
-					if ( ! $is_declaration && ! empty( $current_namespace ) && in_array( $text, self::$frozen_public_classes, true ) ) {
-						$output .= '\\' . $current_namespace . '\\' . $text;
-						continue;
-					}
-					if ( isset( $this->class_map[ $text ] ) ) {
-						$target = $this->class_map[ $text ];
-						$output .= ( $this->flatten_namespaces && ! empty( $current_namespace ) && ! $is_declaration ) ? ( '\\' . $target ) : $target;
-						continue;
-					}
-					if ( isset( $this->function_map[ $text ] ) ) {
-						$output .= $this->function_map[ $text ];
-						continue;
-					}
+						if ( ! $is_declaration && isset( $file_use_map[ $text ] ) ) {
+							if ( isset( $this->class_map[ $file_use_map[ $text ] ] ) ) {
+								$target = $this->class_map[ $file_use_map[ $text ] ];
+								$output .= ( $this->flatten_namespaces && ! empty( $current_namespace ) ) ? ( '\\' . $target ) : $target;
+								continue;
+							} else {
+								$output .= '\\' . $file_use_map[ $text ];
+								continue;
+							}
+						}
+						if ( ! empty( $current_namespace ) && isset( $this->class_map[ $current_namespace . '\\' . $text ] ) ) {
+							$target = $this->class_map[ $current_namespace . '\\' . $text ];
+							if ( $decl_type === T_CLASS || $decl_type === T_INTERFACE || $decl_type === T_TRAIT || ( defined( 'T_ENUM' ) && $decl_type === T_ENUM ) ) {
+								$declared_classes_in_file[ $current_namespace . '\\' . $text ] = array(
+									'mangled' => $target,
+									'type'    => $decl_type,
+								);
+							}
+							if ( $this->flatten_namespaces ) {
+								$output .= ( $is_declaration || empty( $current_namespace ) ) ? $target : ( '\\' . $target );
+							} else {
+								if ( strncmp( $target, $current_namespace . '\\', strlen( $current_namespace ) + 1 ) === 0 ) {
+									$output .= substr( $target, strlen( $current_namespace ) + 1 );
+								} else {
+									$output .= $target;
+								}
+							}
+							continue;
+						}
+						if ( ! $is_declaration && ! empty( $current_namespace ) && in_array( $text, self::$frozen_public_classes, true ) ) {
+							$output .= '\\' . $current_namespace . '\\' . $text;
+							continue;
+						}
+						if ( isset( $this->class_map[ $text ] ) ) {
+							$target = $this->class_map[ $text ];
+							$output .= ( $this->flatten_namespaces && ! empty( $current_namespace ) && ! $is_declaration ) ? ( '\\' . $target ) : $target;
+							continue;
+						}
+
+						$p = $this->prev_code_index( $tokens, $i );
+						$is_prop_or_method = ( $p >= 0 && is_array( $tokens[ $p ] ) && in_array( $tokens[ $p ][0], array( T_OBJECT_OPERATOR, defined( 'T_NULLSAFE_OBJECT_OPERATOR' ) ? T_NULLSAFE_OBJECT_OPERATOR : -1, T_DOUBLE_COLON ), true ) );
+						if ( ! $is_declaration && ! $is_prop_or_method ) {
+							$func_target = $this->resolve_function_name( $text, $current_namespace, $file_use_func_map );
+							if ( $func_target !== null ) {
+								$output .= $func_target;
+								continue;
+							}
+						}
 					}
 				}
 
@@ -1299,10 +1625,19 @@ class Plan3_Transformer {
 				if ( $id === T_CONSTANT_ENCAPSED_STRING ) {
 					$raw_str = trim( $text, "'\"" );
 					$norm_str = ltrim( str_replace( '\\\\', '\\', $raw_str ), '\\' );
-					$is_hook_name = $this->is_hook_name_string( $tokens, $i );
-					$is_callback_string = $this->is_array_callable_method_string( $tokens, $i ) || $this->is_callback_key_string( $tokens, $i );
 
-					if ( ! $is_hook_name && isset( $this->class_map[ $norm_str ] ) && ( strpos( $norm_str, '\\' ) !== false || ( ! in_array( $norm_str, array( 'Settings', 'Module', 'Plugin', 'User', 'Order', 'Product', 'Customer', 'Option', 'Helper', 'General', 'Admin', 'View', 'Table', 'Field', 'Form', 'Config', 'Schema', 'License', 'Session', 'Hooks', 'Logger', 'Scripts', 'Ajax', 'Documentation', 'Requirements', 'Whitelabel', 'Tours', 'Catalog' ), true ) && strlen( $norm_str ) > 4 ) ) ) {
+					if ( $this->is_gettext_string( $tokens, $i ) ||
+					     $this->is_array_key_string( $tokens, $i, $count ) ||
+					     $this->is_array_subscript_string( $tokens, $i ) ||
+					     $this->is_hook_name_string( $tokens, $i ) ) {
+						$output .= $text;
+						continue;
+					}
+
+					$is_callback_string = $this->is_array_callable_method_string( $tokens, $i ) || $this->is_callback_key_string( $tokens, $i ) || $this->is_callback_argument_string( $tokens, $i );
+					$is_reflection = $this->is_reflection_or_instantiation_string( $tokens, $i );
+
+					if ( isset( $this->class_map[ $norm_str ] ) && ( strpos( $norm_str, '\\' ) !== false || $is_reflection || $this->is_array_callable_method_string( $tokens, $i ) ) ) {
 						$quote = $text[0];
 						$target = $this->class_map[ $norm_str ];
 						if ( ! $this->flatten_namespaces && substr( $raw_str, 0, 1 ) === '\\' ) {
@@ -1314,28 +1649,36 @@ class Plan3_Transformer {
 						$output .= $quote . $target . $quote;
 						continue;
 					}
-					if ( ! $is_hook_name && isset( $this->function_map[ $norm_str ] ) && ( strpos( $norm_str, 'wpdev_' ) === 0 || strpos( $norm_str, 'tavangary_' ) === 0 || strlen( $norm_str ) > 6 ) && ! in_array( $norm_str, array( 'table', 'list', 'date', 'fields', 'page', 'text', 'view', 'render', 'display', 'output', 'options' ), true ) ) {
-						$quote = $text[0];
-						$output .= $quote . $this->function_map[ $norm_str ] . $quote;
-						continue;
+
+					if ( $is_callback_string ) {
+						$func_target = $this->resolve_function_name( $norm_str, $current_namespace, $file_use_func_map );
+						if ( $func_target !== null ) {
+							$quote = $text[0];
+							$output .= $quote . $func_target . $quote;
+							continue;
+						}
 					}
-					if ( isset( $private_methods[ $raw_str ] ) && $is_callback_string && ! $is_hook_name ) {
+
+					if ( isset( $private_methods[ $raw_str ] ) && $is_callback_string ) {
 						$quote = $text[0];
 						$output .= $quote . $private_methods[ $raw_str ] . $quote;
 						continue;
 					}
-					if ( ! $is_hook_name && isset( $private_constants[ $raw_str ] ) ) {
+					if ( isset( $private_constants[ $raw_str ] ) ) {
 						$quote = $text[0];
 						$output .= $quote . $private_constants[ $raw_str ] . $quote;
 						continue;
 					}
+
 					$output .= $text;
 					continue;
 				}
 
 				// 7. Variable Mangling
 				if ( $id === T_VARIABLE ) {
-					if ( in_array( $text, self::$reserved_vars, true ) || $is_view_file ) {
+					$scope_id = isset( $token_scopes[ $i ] ) ? $token_scopes[ $i ] : 0;
+					$is_dynamic = ! empty( $dynamic_scopes[ $scope_id ] ) || ! empty( $dynamic_scopes[0] );
+					if ( in_array( $text, self::$reserved_vars, true ) || isset( $preserved_vars[ $text ] ) || $is_view_file || $is_dynamic ) {
 						$output .= $text;
 					} else {
 						$raw_name = substr( $text, 1 );
@@ -1476,6 +1819,8 @@ class Plan3_Transformer {
 			}
 		}
 
+
+
 		return array(
 			'code'     => $output,
 			'manifest' => array(
@@ -1493,15 +1838,28 @@ if ( isset( $argv[0] ) && basename( $argv[0] ) === 'transformer.php' ) {
 		$seed        = isset( $argv[4] ) ? $argv[4] : 'wpdev-plan3-release';
 		$main_file   = isset( $argv[5] ) ? $argv[5] : '';
 
+		if ( empty( $staging_dir ) || ! is_dir( $staging_dir ) ) {
+			fwrite( STDERR, "Error: Staging directory not found: $staging_dir\n" );
+			exit( 1 );
+		}
+
 		$transformer = new Plan3_Transformer( $seed );
-		if ( ! empty( $map_file ) && is_file( $map_file ) ) {
-			$loaded = json_decode( file_get_contents( $map_file ), true );
-			if ( is_array( $loaded ) ) {
-				$transformer->class_map    = isset( $loaded['classes'] ) ? $loaded['classes'] : array();
-				$transformer->function_map = isset( $loaded['functions'] ) ? $loaded['functions'] : array();
-				$transformer->constant_map = isset( $loaded['constants'] ) ? $loaded['constants'] : array();
-				$transformer->class_kinds  = isset( $loaded['kinds'] ) ? $loaded['kinds'] : array();
+		if ( ! empty( $map_file ) ) {
+			if ( ! is_file( $map_file ) ) {
+				fwrite( STDERR, "Error: Map file not found: $map_file\n" );
+				exit( 1 );
 			}
+			$raw_map = @file_get_contents( $map_file );
+			if ( $raw_map === false ) {
+				fwrite( STDERR, "Error: Unable to read map file: $map_file\n" );
+				exit( 1 );
+			}
+			$loaded = json_decode( $raw_map, true );
+			if ( ! is_array( $loaded ) || ! isset( $loaded['classes'] ) || ! isset( $loaded['functions'] ) ) {
+				fwrite( STDERR, "Error: Invalid map file schema in: $map_file\n" );
+				exit( 1 );
+			}
+			$transformer->load_map_from_array( $loaded );
 		}
 
 		$iterator = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $staging_dir, RecursiveDirectoryIterator::SKIP_DOTS ) );
@@ -1513,10 +1871,26 @@ if ( isset( $argv[0] ) && basename( $argv[0] ) === 'transformer.php' ) {
 					continue;
 				}
 				$is_main = ! empty( $main_file ) && basename( $path ) === $main_file;
-				$source = file_get_contents( $path );
+				$source = @file_get_contents( $path );
+				if ( $source === false ) {
+					fwrite( STDERR, "Error: Failed to read source file: $path\n" );
+					exit( 1 );
+				}
 				$res = $transformer->transform( $source, $is_main, $path );
-				file_put_contents( $path, $res['code'] );
-				$manifests[] = $res['manifest'];
+				if ( ! isset( $res['code'] ) || ! is_string( $res['code'] ) ) {
+					fwrite( STDERR, "Error: Transform failed for: $path\n" );
+					exit( 1 );
+				}
+				$expected_len = strlen( $res['code'] );
+				$written = @file_put_contents( $path, $res['code'] );
+				if ( $written === false || $written !== $expected_len ) {
+					fwrite( STDERR, "Error: Failed to write transformed file (written $written of $expected_len bytes): $path\n" );
+					exit( 1 );
+				}
+				$entry = $res['manifest'];
+				$entry['sha256'] = hash( 'sha256', $res['code'] );
+				$entry['bytes']  = $written;
+				$manifests[] = $entry;
 			}
 		}
 		echo json_encode( $manifests ) . "\n";
@@ -1528,6 +1902,11 @@ if ( isset( $argv[0] ) && basename( $argv[0] ) === 'transformer.php' ) {
 		$map_out  = isset( $argv[3] ) ? $argv[3] : '';
 		$seed     = isset( $argv[4] ) ? $argv[4] : 'wpdev-plan3-release';
 
+		if ( empty( $scan_dir ) || ! is_dir( $scan_dir ) ) {
+			fwrite( STDERR, "Error: Scan directory not found: $scan_dir\n" );
+			exit( 1 );
+		}
+
 		$transformer = new Plan3_Transformer( $seed );
 		$transformer->scan_symbols_in_dir( $scan_dir );
 		$payload = array(
@@ -1536,7 +1915,17 @@ if ( isset( $argv[0] ) && basename( $argv[0] ) === 'transformer.php' ) {
 			'constants' => $transformer->constant_map,
 			'kinds'     => $transformer->class_kinds,
 		);
-		file_put_contents( $map_out, json_encode( $payload, JSON_PRETTY_PRINT ) );
+		$encoded = json_encode( $payload, JSON_PRETTY_PRINT );
+		if ( $encoded === false ) {
+			fwrite( STDERR, "Error: Failed to JSON encode symbol map\n" );
+			exit( 1 );
+		}
+		$expected_len = strlen( $encoded );
+		$written = @file_put_contents( $map_out, $encoded );
+		if ( $written === false || $written !== $expected_len ) {
+			fwrite( STDERR, "Error: Failed to write symbol map to $map_out\n" );
+			exit( 1 );
+		}
 		echo "DUMPED_MAP_OK\n";
 		exit( 0 );
 	}
@@ -1566,18 +1955,42 @@ if ( isset( $argv[0] ) && basename( $argv[0] ) === 'transformer.php' ) {
 	}
 
 	$transformer = new Plan3_Transformer( $seed );
-	if ( ! empty( $map_file ) && is_file( $map_file ) ) {
-		$loaded = json_decode( file_get_contents( $map_file ), true );
-		if ( is_array( $loaded ) ) {
-			$transformer->class_map    = isset( $loaded['classes'] ) ? $loaded['classes'] : array();
-			$transformer->function_map = isset( $loaded['functions'] ) ? $loaded['functions'] : array();
-			$transformer->constant_map = isset( $loaded['constants'] ) ? $loaded['constants'] : array();
-			$transformer->class_kinds  = isset( $loaded['kinds'] ) ? $loaded['kinds'] : array();
+	if ( ! empty( $map_file ) ) {
+		if ( ! is_file( $map_file ) ) {
+			fwrite( STDERR, "Error: Map file not found: $map_file\n" );
+			exit( 1 );
 		}
+		$raw_map = @file_get_contents( $map_file );
+		if ( $raw_map === false ) {
+			fwrite( STDERR, "Error: Unable to read map file: $map_file\n" );
+			exit( 1 );
+		}
+		$loaded = json_decode( $raw_map, true );
+		if ( ! is_array( $loaded ) || ! isset( $loaded['classes'] ) || ! isset( $loaded['functions'] ) ) {
+			fwrite( STDERR, "Error: Invalid map file schema in: $map_file\n" );
+			exit( 1 );
+		}
+		$transformer->load_map_from_array( $loaded );
 	}
-	$source = file_get_contents( $target_file );
+	$source = @file_get_contents( $target_file );
+	if ( $source === false ) {
+		fwrite( STDERR, "Error: Failed to read target file: $target_file\n" );
+		exit( 1 );
+	}
 	$result = $transformer->transform( $source, $is_main, $target_file );
-	file_put_contents( $target_file, $result['code'] );
-	echo json_encode( $result['manifest'] ) . "\n";
+	if ( ! isset( $result['code'] ) || ! is_string( $result['code'] ) ) {
+		fwrite( STDERR, "Error: Transform failed for: $target_file\n" );
+		exit( 1 );
+	}
+	$expected_len = strlen( $result['code'] );
+	$written = @file_put_contents( $target_file, $result['code'] );
+	if ( $written === false || $written !== $expected_len ) {
+		fwrite( STDERR, "Error: Failed to write target file: $target_file\n" );
+		exit( 1 );
+	}
+	$entry = $result['manifest'];
+	$entry['sha256'] = hash( 'sha256', $result['code'] );
+	$entry['bytes']  = $written;
+	echo json_encode( $entry ) . "\n";
 }
 
