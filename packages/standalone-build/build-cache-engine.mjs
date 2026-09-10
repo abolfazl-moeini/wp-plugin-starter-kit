@@ -2512,13 +2512,12 @@ export function planDependencyGraphBuild({
     const prevPluginFingerprint = previousCache.artifacts?.[plugin]?.compositeFingerprint || previousCache[plugin];
     const currentPluginSource = currentFingerprints.plugins[plugin] || "missing";
     const buildPlan = pluginBuildPlans?.[plugin] || options.buildPlan || null;
-    const effectiveProfile = buildPlan ? buildPlan.artifactIdentity.capabilityTag : profile;
     const compositeFingerprint = computePluginCompositeFingerprint({
       toolsFingerprint: currentFingerprints.tools,
       wpdevFingerprint: currentFingerprints.wpdev,
       pluginSourceFingerprint: currentPluginSource,
       toolchainFingerprint: currentFingerprints.toolchain || "",
-      profile: effectiveProfile,
+      profile,
       options,
       buildPlan,
     });

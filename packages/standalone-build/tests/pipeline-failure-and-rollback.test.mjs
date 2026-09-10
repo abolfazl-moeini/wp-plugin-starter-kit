@@ -30,8 +30,10 @@ import {
   recoverInterruptedDeployment,
   REQUIRED_ARTIFACT_TESTS,
   TEST_SPEC_MAP,
+  CACHE_SCHEMA_VERSION,
 } from "../build-cache-engine.mjs";
 import { BuildDag } from "../build-dag-runner.mjs";
+import { createBuildPlan } from "../build-plan.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -283,7 +285,7 @@ test("Failure Scenario 6: Production orchestrator strictly rejects invalid cache
 
     // 1. Symlink cache file in release mode -> fails closed
     const realFile = path.join(tmpDir, "real-cache.json");
-    await fs.promises.writeFile(realFile, JSON.stringify({ schemaVersion: 2 }), "utf8");
+    await fs.promises.writeFile(realFile, JSON.stringify({ schemaVersion: CACHE_SCHEMA_VERSION }), "utf8");
     await fs.promises.symlink(realFile, cacheFile);
 
     await assert.rejects(
@@ -303,7 +305,7 @@ test("Failure Scenario 6: Production orchestrator strictly rejects invalid cache
     await fs.promises.rm(cacheFile);
 
     // 2. Incomplete cache file in deploy mode -> fails closed
-    await fs.promises.writeFile(cacheFile, JSON.stringify({ schemaVersion: 2, _tools: "abc" }), "utf8");
+    await fs.promises.writeFile(cacheFile, JSON.stringify({ schemaVersion: CACHE_SCHEMA_VERSION, _tools: "abc" }), "utf8");
     await assert.rejects(
       async () => {
         await runPipelineOrchestration({
@@ -378,6 +380,7 @@ test("Failure Scenario 7: Production orchestrator rollback on smoke failure leav
     const toolFiles = fps.toolFiles;
     const toolchain = fps.toolchain;
 
+    const buildPlan = createBuildPlan({ consumer, profile: "s", isObfuscate: true });
     const compRaw = computePluginCompositeFingerprint({
       toolsFingerprint: toolsSha,
       wpdevFingerprint: wpdevSha,
@@ -385,6 +388,7 @@ test("Failure Scenario 7: Production orchestrator rollback on smoke failure leav
       toolchainFingerprint: toolchain,
       // Hermetic Profile S fixture (F05 tier separation).
       profile: "s",
+      buildPlan,
     });
     const compositeFp = compRaw;
 
@@ -421,7 +425,7 @@ test("Failure Scenario 7: Production orchestrator rollback on smoke failure leav
     }
 
     const initialCacheData = {
-      schemaVersion: 2,
+      schemaVersion: CACHE_SCHEMA_VERSION,
       _tools: toolsSha,
       _toolFiles: toolFiles,
       _wpdev: wpdevSha,
@@ -439,6 +443,7 @@ test("Failure Scenario 7: Production orchestrator rollback on smoke failure leav
           themeFingerprint: themeSha,
           toolchainFingerprint: toolchain,
           compositeFingerprint: compositeFp,
+          planFingerprint: buildPlan.artifactIdentity.fingerprint,
           zipSha256,
           manifestDigest,
           validationState: "tests-passed",
@@ -541,6 +546,7 @@ test("Failure Scenario 8: Failure immediately after swap (during_swap) on non-ex
       contentRoot: tmpDir,
     });
 
+    const buildPlan = createBuildPlan({ consumer, profile: "s", isObfuscate: true });
     const compositeFp = computePluginCompositeFingerprint({
       toolsFingerprint: fps.tools,
       wpdevFingerprint: fps.wpdev,
@@ -549,6 +555,7 @@ test("Failure Scenario 8: Failure immediately after swap (during_swap) on non-ex
       // Hermetic fixtures below are Profile S artifacts; the tier is part of
       // the composite identity (F05), so the test pipeline must run obfuscated.
       profile: "s",
+      buildPlan,
     });
     const requiredTests = REQUIRED_ARTIFACT_TESTS[consumer];
     const testEvidence = {};
@@ -580,7 +587,7 @@ test("Failure Scenario 8: Failure immediately after swap (during_swap) on non-ex
     }
 
     const initialCacheData = {
-      schemaVersion: 2,
+      schemaVersion: CACHE_SCHEMA_VERSION,
       _tools: fps.tools,
       _toolFiles: fps.toolFiles,
       _wpdev: fps.wpdev,
@@ -598,6 +605,7 @@ test("Failure Scenario 8: Failure immediately after swap (during_swap) on non-ex
           themeFingerprint: fps.theme,
           toolchainFingerprint: fps.toolchain,
           compositeFingerprint: compositeFp,
+          planFingerprint: buildPlan.artifactIdentity.fingerprint,
           zipSha256,
           manifestDigest,
           validationState: "tests-passed",
@@ -673,6 +681,7 @@ test("Failure Scenario 9: Multi-file commit failure (during_commit) leaves zero 
       contentRoot: tmpDir,
     });
 
+    const buildPlan = createBuildPlan({ consumer, profile: "s", isObfuscate: true });
     const compositeFp = computePluginCompositeFingerprint({
       toolsFingerprint: fps.tools,
       wpdevFingerprint: fps.wpdev,
@@ -681,6 +690,7 @@ test("Failure Scenario 9: Multi-file commit failure (during_commit) leaves zero 
       // Hermetic fixtures below are Profile S artifacts; the tier is part of
       // the composite identity (F05), so the test pipeline must run obfuscated.
       profile: "s",
+      buildPlan,
     });
 
     const requiredTests = REQUIRED_ARTIFACT_TESTS[consumer];
@@ -713,7 +723,7 @@ test("Failure Scenario 9: Multi-file commit failure (during_commit) leaves zero 
     }
 
     const initialCacheData = {
-      schemaVersion: 2,
+      schemaVersion: CACHE_SCHEMA_VERSION,
       _tools: fps.tools,
       _toolFiles: fps.toolFiles,
       _wpdev: fps.wpdev,
@@ -731,6 +741,7 @@ test("Failure Scenario 9: Multi-file commit failure (during_commit) leaves zero 
           themeFingerprint: fps.theme,
           toolchainFingerprint: fps.toolchain,
           compositeFingerprint: compositeFp,
+          planFingerprint: buildPlan.artifactIdentity.fingerprint,
           zipSha256,
           manifestDigest,
           validationState: "tests-passed",
@@ -854,6 +865,7 @@ test("Failure Scenario 10: Startup journal recovery restores interrupted deploym
       contentRoot: tmpDir,
     });
 
+    const buildPlan = createBuildPlan({ consumer, profile: "s", isObfuscate: true });
     const compositeFp = computePluginCompositeFingerprint({
       toolsFingerprint: fps.tools,
       wpdevFingerprint: fps.wpdev,
@@ -862,10 +874,11 @@ test("Failure Scenario 10: Startup journal recovery restores interrupted deploym
       // Hermetic fixtures below are Profile S artifacts; the tier is part of
       // the composite identity (F05), so the test pipeline must run obfuscated.
       profile: "s",
+      buildPlan,
     });
 
     const initialCacheData = {
-      schemaVersion: 2,
+      schemaVersion: CACHE_SCHEMA_VERSION,
       _tools: fps.tools,
       _toolFiles: fps.toolFiles,
       _wpdev: fps.wpdev,
@@ -883,6 +896,7 @@ test("Failure Scenario 10: Startup journal recovery restores interrupted deploym
           themeFingerprint: fps.theme,
           toolchainFingerprint: fps.toolchain,
           compositeFingerprint: compositeFp,
+          planFingerprint: buildPlan.artifactIdentity.fingerprint,
           zipSha256,
           manifestDigest,
           validationState: "tests-passed",
@@ -996,6 +1010,7 @@ test("Failure Scenario 11: Crash after backup_renamed but before candidate_swapp
       contentRoot: tmpDir,
     });
 
+    const buildPlan = createBuildPlan({ consumer, profile: "s", isObfuscate: true });
     const compositeFp = computePluginCompositeFingerprint({
       toolsFingerprint: fps.tools,
       wpdevFingerprint: fps.wpdev,
@@ -1004,10 +1019,11 @@ test("Failure Scenario 11: Crash after backup_renamed but before candidate_swapp
       // Hermetic fixtures below are Profile S artifacts; the tier is part of
       // the composite identity (F05), so the test pipeline must run obfuscated.
       profile: "s",
+      buildPlan,
     });
 
     const initialCacheData = {
-      schemaVersion: 2,
+      schemaVersion: CACHE_SCHEMA_VERSION,
       _tools: fps.tools,
       _toolFiles: fps.toolFiles,
       _wpdev: fps.wpdev,
@@ -1025,6 +1041,7 @@ test("Failure Scenario 11: Crash after backup_renamed but before candidate_swapp
           themeFingerprint: fps.theme,
           toolchainFingerprint: fps.toolchain,
           compositeFingerprint: compositeFp,
+          planFingerprint: buildPlan.artifactIdentity.fingerprint,
           zipSha256,
           manifestDigest,
           validationState: "tests-passed",
@@ -2326,12 +2343,16 @@ test("Failure Scenario 32: Multi-target deployment with candidate digest transit
       contentRoot,
     });
 
+    const corePlan = createBuildPlan({ consumer: "tavangary-core", profile: "s", isObfuscate: true });
+    const crmPlan = createBuildPlan({ consumer: "wpdev-crm", profile: "s", isObfuscate: true });
+
     const coreComposite = computePluginCompositeFingerprint({
       toolsFingerprint: fp.tools,
       wpdevFingerprint: fp.wpdev,
       pluginSourceFingerprint: fp.plugins["tavangary-core"],
       toolchainFingerprint: fp.toolchain,
       profile: "s",
+      buildPlan: corePlan,
     });
 
     const crmComposite = computePluginCompositeFingerprint({
@@ -2340,12 +2361,13 @@ test("Failure Scenario 32: Multi-target deployment with candidate digest transit
       pluginSourceFingerprint: fp.plugins["wpdev-crm"],
       toolchainFingerprint: fp.toolchain,
       profile: "s",
+      buildPlan: crmPlan,
     });
 
     const themeHash = (fp.theme && fp.theme !== "missing") ? fp.theme : "0".repeat(64);
 
     const initialCache = {
-      schemaVersion: 2,
+      schemaVersion: CACHE_SCHEMA_VERSION,
       _tools: fp.tools,
       _toolFiles: fp.toolFiles || {},
       _wpdev: fp.wpdev,
@@ -2355,7 +2377,7 @@ test("Failure Scenario 32: Multi-target deployment with candidate digest transit
       toolchain: fp.toolchain,
       artifacts: {
         "tavangary-core": {
-          schemaVersion: 2,
+          schemaVersion: CACHE_SCHEMA_VERSION,
           artifactId: "tavangary-core-profile-s",
           consumer: "tavangary-core",
           sourceFingerprint: fp.plugins["tavangary-core"],
@@ -2364,6 +2386,7 @@ test("Failure Scenario 32: Multi-target deployment with candidate digest transit
           themeFingerprint: themeHash,
           toolchainFingerprint: fp.toolchain,
           compositeFingerprint: coreComposite,
+          planFingerprint: corePlan.artifactIdentity.fingerprint,
           zipSha256: coreZipSha,
           manifestDigest: coreFix.manifestDigest,
           gates: {
@@ -2375,7 +2398,7 @@ test("Failure Scenario 32: Multi-target deployment with candidate digest transit
           validatedAt: new Date().toISOString(),
         },
         "wpdev-crm": {
-          schemaVersion: 2,
+          schemaVersion: CACHE_SCHEMA_VERSION,
           artifactId: "wpdev-crm-profile-s",
           consumer: "wpdev-crm",
           sourceFingerprint: fp.plugins["wpdev-crm"],
@@ -2384,6 +2407,7 @@ test("Failure Scenario 32: Multi-target deployment with candidate digest transit
           themeFingerprint: themeHash,
           toolchainFingerprint: fp.toolchain,
           compositeFingerprint: crmComposite,
+          planFingerprint: crmPlan.artifactIdentity.fingerprint,
           zipSha256: crmZipSha,
           manifestDigest: crmFix.manifestDigest,
           gates: {
@@ -2890,18 +2914,20 @@ test("Failure Scenario 39: Docker smoke node fails if any artifact binding is mi
       contentRoot,
     });
 
+    const corePlan = createBuildPlan({ consumer: "tavangary-core", profile: "s", isObfuscate: true });
     const coreComposite = computePluginCompositeFingerprint({
       toolsFingerprint: fp.tools,
       wpdevFingerprint: fp.wpdev,
       pluginSourceFingerprint: fp.plugins["tavangary-core"],
       toolchainFingerprint: fp.toolchain,
       profile: "s",
+      buildPlan: corePlan,
     });
 
     const themeHash = (fp.theme && fp.theme !== "missing") ? fp.theme : "0".repeat(64);
 
     const initialCache = {
-      schemaVersion: 2,
+      schemaVersion: CACHE_SCHEMA_VERSION,
       _tools: fp.tools,
       _toolFiles: fp.toolFiles || {},
       _wpdev: fp.wpdev,
@@ -2911,7 +2937,7 @@ test("Failure Scenario 39: Docker smoke node fails if any artifact binding is mi
       toolchain: fp.toolchain,
       artifacts: {
         "tavangary-core": {
-          schemaVersion: 2,
+          schemaVersion: CACHE_SCHEMA_VERSION,
           artifactId: "tavangary-core-profile-s",
           consumer: "tavangary-core",
           sourceFingerprint: fp.plugins["tavangary-core"],
@@ -2920,6 +2946,7 @@ test("Failure Scenario 39: Docker smoke node fails if any artifact binding is mi
           themeFingerprint: themeHash,
           toolchainFingerprint: fp.toolchain,
           compositeFingerprint: coreComposite,
+          planFingerprint: corePlan.artifactIdentity.fingerprint,
           zipSha256,
           manifestDigest,
           gates: {

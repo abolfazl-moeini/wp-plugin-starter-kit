@@ -25,6 +25,7 @@ import {
   TEST_SPEC_MAP,
   REQUIRED_ARTIFACT_TESTS,
   createTargetCacheRecord,
+  CACHE_SCHEMA_VERSION,
 } from "../build-cache-engine.mjs";
 import {
   runSelectedNodeTests,
@@ -66,25 +67,25 @@ test("Regression 1: loadBuildCacheRecord strictly rejects symlinks, directories,
 
     // 5. Stale schema
     const staleFile = path.join(tmpDir, "stale.json");
-    await writeFile(staleFile, JSON.stringify({ schemaVersion: 1 }), "utf8");
+    await writeFile(staleFile, JSON.stringify({ schemaVersion: CACHE_SCHEMA_VERSION - 1 }), "utf8");
     const staleRes = await loadBuildCacheRecord(staleFile);
     assert.equal(staleRes.status, "stale_schema");
 
     // 6. Incomplete schema (missing required top level fields)
     const incompleteFile = path.join(tmpDir, "incomplete.json");
-    await writeFile(incompleteFile, JSON.stringify({ schemaVersion: 2, _tools: "abc" }), "utf8");
+    await writeFile(incompleteFile, JSON.stringify({ schemaVersion: CACHE_SCHEMA_VERSION, _tools: "abc" }), "utf8");
     const incompleteRes = await loadBuildCacheRecord(incompleteFile);
     assert.equal(incompleteRes.status, "invalid");
     assert.match(incompleteRes.reason, /missing required top-level field/i);
 
     // 7. Prototype pollution attempt
-    const protoData = JSON.parse('{"schemaVersion":2,"__proto__":{"polluted":true}}');
+    const protoData = JSON.parse(`{"schemaVersion":${CACHE_SCHEMA_VERSION},"__proto__":{"polluted":true}}`);
     const protoVal = validateBuildCacheSchema(protoData);
     assert.equal(protoVal.valid, false);
 
     // 8. Fully Valid Cache Record
     const validData = {
-      schemaVersion: 2,
+      schemaVersion: CACHE_SCHEMA_VERSION,
       _tools: "a".repeat(64),
       _toolFiles: { "tools/test.mjs": "b".repeat(64) },
       _wpdev: "c".repeat(64),
@@ -969,6 +970,7 @@ test("Regression 22: Incremental build planner invariant: exactly 1 rebuilt and 
     const { createHermeticZipFixture } = await import("../artifact-fixture-helper.mjs");
     const { computeAllFingerprintsParallel, computePluginCompositeFingerprint, planDependencyGraphBuild } = await import("../build-cache-engine.mjs");
     const { runPipelineOrchestration } = await import("../build-all-standalone-plugins.mjs");
+    const { createBuildPlan } = await import("../build-plan.mjs");
 
     // Create lightweight source trees
     for (const p of ["tavangary-core-dev", "tavangary-theme-panel-dev", "wpdev-crm-dev", "wpdev-tickets-dev", "wpdev"]) {
@@ -977,7 +979,12 @@ test("Regression 22: Incremental build planner invariant: exactly 1 rebuilt and 
       await fs.promises.writeFile(path.join(pluginsDir, p, mainPhp), `<?php // ${p} source\n`, "utf8");
     }
 
-    // Create 4 valid hermetic ZIPs and schema 2 cache entries
+    const pluginBuildPlans = {};
+    for (const p of ["tavangary-core", "tavangary-theme-panel", "wpdev-crm", "wpdev-tickets"]) {
+      pluginBuildPlans[p] = createBuildPlan({ consumer: p, profile: "s", isObfuscate: true });
+    }
+
+    // Create 4 valid hermetic ZIPs and schema cache entries
     const artifactsCache = {};
     for (const consumer of ["tavangary-core", "tavangary-theme-panel", "wpdev-crm", "wpdev-tickets"]) {
       const fix = await createHermeticZipFixture({ tmpDir, consumer });
@@ -997,10 +1004,11 @@ test("Regression 22: Incremental build planner invariant: exactly 1 rebuilt and 
         pluginSourceFingerprint: fp.plugins[consumer],
         toolchainFingerprint: fp.toolchain,
         profile: "s",
+        buildPlan: pluginBuildPlans[consumer],
       });
 
       artifactsCache[consumer] = {
-        schemaVersion: 2,
+        schemaVersion: CACHE_SCHEMA_VERSION,
         artifactId: `${consumer}-profile-s`,
         consumer,
         profile: "s",
@@ -1010,6 +1018,7 @@ test("Regression 22: Incremental build planner invariant: exactly 1 rebuilt and 
         themeFingerprint: (fp.theme && fp.theme !== "missing") ? fp.theme : "0".repeat(64),
         toolchainFingerprint: fp.toolchain,
         compositeFingerprint: comp,
+        planFingerprint: pluginBuildPlans[consumer].artifactIdentity.fingerprint,
         zipSha256: fix.zipSha256,
         manifestDigest: fix.manifestDigest,
         gates: {
@@ -1030,7 +1039,7 @@ test("Regression 22: Incremental build planner invariant: exactly 1 rebuilt and 
     });
 
     const initialCache = {
-      schemaVersion: 2,
+      schemaVersion: CACHE_SCHEMA_VERSION,
       _tools: initialFp.tools,
       _toolFiles: initialFp.toolFiles || {},
       _wpdev: initialFp.wpdev,
@@ -1049,6 +1058,7 @@ test("Regression 22: Incremental build planner invariant: exactly 1 rebuilt and 
       targetPlugins: ["tavangary-core", "tavangary-theme-panel", "wpdev-crm", "wpdev-tickets"],
       mode: "incremental",
       profile: "s",
+      pluginBuildPlans,
     });
     for (const p of ["tavangary-core", "tavangary-theme-panel", "wpdev-crm", "wpdev-tickets"]) {
       assert.equal(untouchedPlan[p]?.shouldRebuild, false, `Untouched plugin ${p} must be cached`);
@@ -1074,6 +1084,7 @@ test("Regression 22: Incremental build planner invariant: exactly 1 rebuilt and 
       targetPlugins: ["tavangary-core", "tavangary-theme-panel", "wpdev-crm", "wpdev-tickets"],
       mode: "incremental",
       profile: "s",
+      pluginBuildPlans,
     });
 
     assert.equal(plan["tavangary-core"]?.shouldRebuild, true, "Changed plugin must be planned for rebuild");
@@ -1085,7 +1096,7 @@ test("Regression 22: Incremental build planner invariant: exactly 1 rebuilt and 
     // Negative invariant test: Missing cache entry forces rebuild with fail-closed reason
     const emptyCachePlan = planDependencyGraphBuild({
       currentFingerprints: postTouchFp,
-      previousCache: { schemaVersion: 2, artifacts: {} },
+      previousCache: { schemaVersion: CACHE_SCHEMA_VERSION, artifacts: {} },
       targetPlugins: ["tavangary-core"],
       mode: "incremental",
       profile: "s",
