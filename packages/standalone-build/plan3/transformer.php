@@ -727,6 +727,15 @@ class Plan3_Transformer {
 			if ( isset( $this->function_map[ '\\' . $target_fqfn ] ) ) {
 				return ltrim( $this->function_map[ '\\' . $target_fqfn ], '\\' );
 			}
+			// Flattened namespaces relocate declarations to global scope; without
+			// mangling the declaration keeps its short name, so the old qualified
+			// spelling no longer exists. Reference the global short name explicitly.
+			if ( $this->flatten_namespaces && ! $this->mangle_symbols && strpos( $target_fqfn, '\\' ) !== false ) {
+				$target_ns = substr( $target_fqfn, 0, strrpos( $target_fqfn, '\\' ) );
+				if ( ! isset( $this->retained_namespaces[ $target_ns ] ) ) {
+					return '\\' . substr( $target_fqfn, strrpos( $target_fqfn, '\\' ) + 1 );
+				}
+			}
 			return $target_fqfn;
 		}
 
@@ -1063,6 +1072,83 @@ class Plan3_Transformer {
 		$this->symbols_analyzed    = true;
 	}
 
+	/**
+	 * Split a namespace use-statement body on top-level commas.
+	 * Commas inside group-use braces (use Foo\{A, B}) do not split.
+	 */
+	protected function split_use_statement_clauses( $inner ) {
+		$clauses = array();
+		$depth   = 0;
+		$current = '';
+		$len     = strlen( $inner );
+		for ( $k = 0; $k < $len; $k++ ) {
+			$ch = $inner[ $k ];
+			if ( $ch === '{' ) {
+				$depth++;
+			} elseif ( $ch === '}' ) {
+				$depth = max( 0, $depth - 1 );
+			}
+			if ( $ch === ',' && $depth === 0 ) {
+				$clauses[] = $current;
+				$current   = '';
+			} else {
+				$current .= $ch;
+			}
+		}
+		if ( trim( $current ) !== '' ) {
+			$clauses[] = $current;
+		}
+		return $clauses;
+	}
+
+	/**
+	 * Expand one group-use clause (use Foo\{Bar, function baz, const QUX})
+	 * into individual single-import clause strings. Non-group clauses pass
+	 * through unchanged. Supports mixed group-use member prefixes.
+	 */
+	protected function expand_group_use_clause( $clause ) {
+		$clause = trim( $clause );
+		if ( strpos( $clause, '{' ) === false ) {
+			return array( $clause );
+		}
+		if ( ! preg_match( '/^(function\s+|const\s+)?([a-zA-Z0-9_\\\\]+)\\{(.+)\\}$/is', $clause, $m ) ) {
+			return array( $clause );
+		}
+		$outer_kind = isset( $m[1] ) ? strtolower( trim( $m[1] ) ) : '';
+		$prefix     = rtrim( $m[2], '\\' );
+		$expanded   = array();
+		foreach ( $this->split_use_statement_clauses( $m[3] ) as $member ) {
+			$member = trim( $member );
+			$kind   = $outer_kind;
+			if ( preg_match( '/^(function|const)\s+(.+)$/is', $member, $mm ) ) {
+				$kind   = strtolower( $mm[1] );
+				$member = trim( $mm[2] );
+			}
+			$name  = $member;
+			$alias = '';
+			if ( preg_match( '/^(.+?)\s+as\s+([a-zA-Z0-9_]+)$/is', $member, $ma ) ) {
+				$name  = trim( $ma[1] );
+				$alias = $ma[2];
+			}
+			$fq         = $prefix . '\\' . ltrim( $name, '\\' );
+			$expanded[] = ( $kind !== '' ? $kind . ' ' : '' ) . $fq . ( $alias !== '' ? ' as ' . $alias : '' );
+		}
+		return $expanded;
+	}
+
+	/**
+	 * Brace-aware split of a full use-statement body plus group expansion.
+	 */
+	protected function expand_use_statement_clauses( $inner ) {
+		$out = array();
+		foreach ( $this->split_use_statement_clauses( $inner ) as $clause ) {
+			foreach ( $this->expand_group_use_clause( $clause ) as $expanded ) {
+				$out[] = $expanded;
+			}
+		}
+		return $out;
+	}
+
 	public function scan_file_symbols( $file_path ) {
 		$source = @file_get_contents( $file_path );
 		if ( $source === false ) {
@@ -1251,7 +1337,15 @@ class Plan3_Transformer {
 
 					if ( ! $is_method ) {
 						$next = $i + 1;
-						while ( $next < $count && is_array( $tokens[ $next ] ) && $tokens[ $next ][0] === T_WHITESPACE ) {
+						while ( $next < $count ) {
+							$nt     = $tokens[ $next ];
+							$is_ws  = is_array( $nt ) && $nt[0] === T_WHITESPACE;
+							// Return-by-reference marker: plain '&' on PHP 7.4,
+							// T_AMPERSAND_* array tokens on PHP 8.1+.
+							$is_amp = ( is_string( $nt ) && $nt === '&' ) || ( is_array( $nt ) && $nt[1] === '&' );
+							if ( ! $is_ws && ! $is_amp ) {
+								break;
+							}
 							$next++;
 						}
 						if ( $next < $count && is_array( $tokens[ $next ] ) && $tokens[ $next ][0] === T_STRING ) {
@@ -1260,13 +1354,13 @@ class Plan3_Transformer {
 							$fqfn        = ! empty( $current_namespace ) ? ( $current_namespace . '\\' . $func_name ) : $func_name;
 							$is_reserved = in_array( strtolower( $func_name ), array_map( 'strtolower', self::$reserved_funcs ), true )
 								|| strpos( $func_name, 'wpdev_' ) === 0 || strpos( $func_name, '_wpdev_' ) === 0 || strpos( $func_name, 'tavangary_' ) === 0;
-							$this->symbol_paths[ $fqfn ] = $path . ':' . $func_line;
-							$this->declarations[] = array(
-								'symbol'               => $fqfn,
-								'name'                 => $func_name,
-								'namespace'            => $current_namespace,
-								'kind'                 => 'function',
-								'file'                 => $path,
+						$this->symbol_paths[ $fqfn ] = $file_path . ':' . $func_line;
+						$this->declarations[] = array(
+							'symbol'               => $fqfn,
+							'name'                 => $func_name,
+							'namespace'            => $current_namespace,
+							'kind'                 => 'function',
+							'file'                 => $file_path,
 								'line'                 => $func_line,
 								'is_global'            => empty( $current_namespace ),
 								'is_alias'             => false,
@@ -1279,12 +1373,12 @@ class Plan3_Transformer {
 							if ( ! $this->mangle_symbols ) {
 								continue;
 							}
-							$this->function_declarations[] = array(
-								'fqfn'      => $fqfn,
-								'namespace' => $current_namespace,
-								'name'      => $func_name,
-								'file'      => $path,
-							);
+						$this->function_declarations[] = array(
+							'fqfn'      => $fqfn,
+							'namespace' => $current_namespace,
+							'name'      => $func_name,
+							'file'      => $file_path,
+						);
 							$mangled = '_f_' . substr( hash( 'sha256', $this->seed . ':func:' . strtolower( $fqfn ) ), 0, 8 );
 
 							$is_flattened = $this->flatten_namespaces && ( empty( $current_namespace ) || ! isset( $this->retained_namespaces[ $current_namespace ] ) );
@@ -1328,13 +1422,13 @@ class Plan3_Transformer {
 							$const_name = $tokens[ $next ][1];
 							$const_line = isset( $tokens[ $next ][2] ) ? $tokens[ $next ][2] : 1;
 							$fqcn_const = ! empty( $current_namespace ) ? ( $current_namespace . '\\' . $const_name ) : $const_name;
-							$this->symbol_paths[ $fqcn_const ] = $path . ':' . $const_line;
-							$this->declarations[] = array(
-								'symbol'               => $fqcn_const,
-								'name'                 => $const_name,
-								'namespace'            => $current_namespace,
-								'kind'                 => 'constant',
-								'file'                 => $path,
+						$this->symbol_paths[ $fqcn_const ] = $file_path . ':' . $const_line;
+						$this->declarations[] = array(
+							'symbol'               => $fqcn_const,
+							'name'                 => $const_name,
+							'namespace'            => $current_namespace,
+							'kind'                 => 'constant',
+							'file'                 => $file_path,
 								'line'                 => $const_line,
 								'is_global'            => empty( $current_namespace ),
 								'is_alias'             => false,
@@ -1532,7 +1626,7 @@ class Plan3_Transformer {
 						}
 						$j++;
 					}
-					$clauses = explode( ',', $use_str );
+					$clauses = $this->expand_use_statement_clauses( $use_str );
 					foreach ( $clauses as $clause ) {
 						$clause = trim( $clause );
 						if ( preg_match( '/^function\s+\\\\?([a-zA-Z0-9_\\\\]+)(?:\\s+as\\s+([a-zA-Z0-9_]+))?$/i', $clause, $m ) ) {
@@ -1863,6 +1957,68 @@ class Plan3_Transformer {
 							$clauses[] = $current_clause;
 						}
 
+						$use_inner_raw = '';
+						foreach ( $use_statement_tokens as $ut ) {
+							$use_inner_raw .= is_array( $ut ) ? ( ( $ut[0] === T_WHITESPACE ) ? ' ' : $ut[1] ) : $ut;
+						}
+						$use_has_group = ( strpos( $use_inner_raw, '{' ) !== false );
+
+						if ( $use_has_group && $this->flatten_namespaces && ! $keep_namespace ) {
+							// Grouped use under flattening: expand members and apply
+							// the same per-import preserve/drop decisions as singles.
+							$preserved_clauses = array();
+							foreach ( $this->expand_use_statement_clauses( $use_inner_raw ) as $expanded ) {
+								if ( preg_match( '/^(function|const)\s+/i', $expanded ) ) {
+									$preserved_clauses[] = $expanded;
+									continue;
+								}
+								if ( preg_match( '/^\\\\?([a-zA-Z0-9_\\\\]+)(?:\s+as\s+([a-zA-Z0-9_]+))?$/i', $expanded, $gm ) ) {
+									$group_target = ltrim( $gm[1], '\\' );
+									if ( ! isset( $this->class_map[ $group_target ] ) && ! isset( $this->class_map[ '\\' . $group_target ] ) && strpos( $group_target, '\\' ) !== false ) {
+										$preserved_clauses[] = $expanded;
+									}
+								} else {
+									$preserved_clauses[] = $expanded;
+								}
+							}
+							// One statement per member: repeating the function/const
+							// keyword inside a comma list is a parse error.
+							foreach ( $preserved_clauses as $preserved_clause ) {
+								$output .= 'use ' . $preserved_clause . ";\n";
+							}
+							$i = $j - 1;
+							continue;
+						}
+
+						if ( $use_has_group && ( ! $this->flatten_namespaces || $keep_namespace ) ) {
+							// Grouped use without flattening: expand members and map
+							// project classes exactly like single imports.
+							$rendered_clauses = array();
+							foreach ( $this->expand_use_statement_clauses( $use_inner_raw ) as $expanded ) {
+								if ( preg_match( '/^(function|const)\s+/i', $expanded ) ) {
+									$rendered_clauses[] = $expanded;
+									continue;
+								}
+								if ( preg_match( '/^\\\\?([a-zA-Z0-9_\\\\]+)(?:\s+as\s+([a-zA-Z0-9_]+))?$/i', $expanded, $gm ) ) {
+									$group_target = ltrim( $gm[1], '\\' );
+									if ( isset( $this->class_map[ $group_target ] ) ) {
+										$group_mangled = $this->class_map[ $group_target ];
+										$group_parts   = explode( '\\', $group_target );
+										$group_short   = end( $group_parts );
+										$group_alias   = isset( $gm[2] ) && $gm[2] !== '' ? $gm[2] : $group_short;
+										$rendered_clauses[] = $group_mangled . ' as ' . $group_alias;
+										continue;
+									}
+								}
+								$rendered_clauses[] = $expanded;
+							}
+							foreach ( $rendered_clauses as $rendered_clause ) {
+								$output .= 'use ' . $rendered_clause . ";\n";
+							}
+							$i = $j - 1;
+							continue;
+						}
+
 						if ( $this->flatten_namespaces && ! $keep_namespace ) {
 							$preserved_clauses = array();
 							foreach ( $clauses as $clause ) {
@@ -2123,7 +2279,20 @@ class Plan3_Transformer {
 						if ( ! $is_declaration && isset( $file_use_map[ $text ] ) ) {
 							if ( isset( $this->class_map[ $file_use_map[ $text ] ] ) ) {
 								$target = $this->class_map[ $file_use_map[ $text ] ];
-								$output .= ( $this->flatten_namespaces && ! empty( $current_namespace ) && ! $keep_namespace ) ? ( '\\' . $target ) : $target;
+								if ( $this->flatten_namespaces && ! empty( $current_namespace ) && ! $keep_namespace ) {
+									$output .= '\\' . $target;
+								} elseif ( ! empty( $current_namespace ) && strpos( $target, '\\' ) !== false ) {
+									// A bare qualified name inside a namespace block
+									// resolves relative to it: shorten same-namespace
+									// targets, anchor everything else globally.
+									if ( strncmp( $target, $current_namespace . '\\', strlen( $current_namespace ) + 1 ) === 0 ) {
+										$output .= substr( $target, strlen( $current_namespace ) + 1 );
+									} else {
+										$output .= '\\' . ltrim( $target, '\\' );
+									}
+								} else {
+									$output .= $target;
+								}
 								continue;
 							} else {
 								$output .= '\\' . $file_use_map[ $text ];
@@ -2282,7 +2451,10 @@ class Plan3_Transformer {
 
 					$scope_id = isset( $token_scopes[ $i ] ) ? $token_scopes[ $i ] : 0;
 					$is_dynamic = ! empty( $dynamic_scopes[ $scope_id ] ) || ! empty( $dynamic_scopes[0] );
-					if ( in_array( $text, self::$reserved_vars, true ) ||
+					// Without symbol mangling (clean / spaghetti-only modes) local
+					// names must be retained verbatim per the capability model.
+					if ( ! $this->mangle_symbols ||
+					     in_array( $text, self::$reserved_vars, true ) ||
 					     isset( $preserved_vars[ $text ] ) ||
 					     isset( $this->project_global_vars[ $text ] ) ||
 					     $is_view_file ||

@@ -707,8 +707,25 @@ class Plan3_Symbol_Analyzer {
 									$changed = true;
 								}
 
-								// 1. Downward propagation from parent scope to child
-								if ( $child->type === 'closure' ) {
+							// 0. By-reference captures alias the parent binding: both
+							// scopes must keep one shared name, unconditionally.
+							if ( $child->type === 'closure' ) {
+								foreach ( $child->captured_vars as $c_var => $meta ) {
+									if ( ! empty( $meta['by_ref'] ) ) {
+										if ( ! isset( $child->preserved_vars[ $c_var ] ) ) {
+											$child->preserved_vars[ $c_var ] = true;
+											$changed = true;
+										}
+										if ( ! isset( $scope->preserved_vars[ $c_var ] ) ) {
+											$scope->preserved_vars[ $c_var ] = true;
+											$changed = true;
+										}
+									}
+								}
+							}
+
+							// 1. Downward propagation from parent scope to child
+							if ( $child->type === 'closure' ) {
 									if ( isset( $scope->preserved_vars['*'] ) ) {
 										foreach ( $child->captured_vars as $c_var => $meta ) {
 											if ( ! isset( $child->preserved_vars[ $c_var ] ) ) {

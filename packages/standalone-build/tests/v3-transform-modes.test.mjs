@@ -41,6 +41,31 @@ const MODE_FIXTURES = [
     },
     expectedStdout: "3",
   },
+  {
+    name: "group_use_function",
+    files: {
+      "lib.php": "<?php namespace Foo; function alpha(){return 1;} function beta(){return 2;}",
+      "main.php":
+        "<?php namespace Acme; require __DIR__.'/lib.php'; use function Foo\\{alpha, beta as b}; echo alpha() + b();",
+    },
+    expectedStdout: "3",
+  },
+  {
+    name: "function_return_by_ref",
+    files: {
+      "main.php":
+        "<?php namespace Acme; function &run_it(){static $v=0;$v++;return $v;}$x=&run_it();echo $x;",
+    },
+    expectedStdout: "1",
+  },
+  {
+    name: "closure_byref_capture",
+    files: {
+      "main.php":
+        "<?php function run_it(){$local=7;$fn=function() use(&$local){$local=9;};$fn();return $local;}echo run_it();",
+    },
+    expectedStdout: "9",
+  },
 ];
 
 const MODES = [
