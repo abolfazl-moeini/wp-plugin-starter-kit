@@ -45,6 +45,7 @@ import {
   parseClosedProfileFlags,
   parseTransformerBatchLog,
   requireRectorForProfileS,
+  resolveAndValidateTargetPhpInterpreter,
   secureUnlinkSymbolMap,
   validatePhpSyntaxTree,
 } from "./profile-s-fail-closed.mjs";
@@ -152,6 +153,8 @@ export async function assembleProfileSCandidate(options = {}) {
         skipZip: options.skipZip,
         targetPhp: options.targetPhp || options.phpTarget,
         emitDistDir: options.emitDistDir ?? true,
+        phpBin: options.phpBin,
+        enforceTargetPhp: options.enforceTargetPhp,
       }
     : parseAssembleCli(options.argv || process.argv);
   const {
@@ -189,6 +192,14 @@ export async function assembleProfileSCandidate(options = {}) {
   const signal = options.signal;
   const exec = (file, args, extra = {}) => execFileAsync(file, args, signal ? { ...extra, signal } : extra);
   await assertRequiredBuildTools();
+
+  const targetInterpreter = await resolveAndValidateTargetPhpInterpreter({
+    targetPhp: buildPlan.targetPhp,
+    phpBin: parsed.phpBin || options.phpBin || process.env.WPDEV_PHP_BIN || process.env.WPDEV_PHP74_BIN,
+    enforceTarget: Boolean(
+      parsed.enforceTargetPhp ?? options.enforceTargetPhp ?? (process.env.WPDEV_ENFORCE_TARGET_PHP === "1" || process.env.WPDEV_ENFORCE_TARGET_PHP === "true")
+    ),
+  });
 
   console.log("==> 1. Locating plugin development source...");
   const resolvedSource = sourceRoot
@@ -534,7 +545,13 @@ export async function assembleProfileSCandidate(options = {}) {
     await secureUnlinkSymbolMap(path.join(stagingRoot, "symbol-map.json"));
 
     console.log("==> 6. Validating PHP syntax across all transformed files...");
-    await validatePhpSyntaxTree(stagingPlugin);
+    await validatePhpSyntaxTree(stagingPlugin, {
+      phpBin: targetInterpreter.bin,
+      targetPhp: buildPlan.targetPhp,
+      enforceTarget: Boolean(
+        parsed.enforceTargetPhp ?? options.enforceTargetPhp ?? (process.env.WPDEV_ENFORCE_TARGET_PHP === "1" || process.env.WPDEV_ENFORCE_TARGET_PHP === "true")
+      ),
+    });
     console.log("==> PHP syntax check 100% green!");
 
     const manifestProfile = profile === "s" ? "Profile S" : (profile === "clean" ? "clean" : String(buildPlan.artifactIdentity.capabilityTag));

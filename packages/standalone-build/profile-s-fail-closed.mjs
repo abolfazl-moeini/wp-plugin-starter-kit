@@ -48,6 +48,8 @@ export function parseClosedProfileFlags(argv = []) {
   let minifyAssets;
   let skipZip = false;
   let targetPhp;
+  let phpBin;
+  let enforceTargetPhp;
   let sawObfuscateFlag = false;
 
   for (let i = 0; i < argv.length; i++) {
@@ -88,6 +90,20 @@ export function parseClosedProfileFlags(argv = []) {
     if (targetPhpArg) {
       targetPhp = String(targetPhpArg.value).trim();
       i += targetPhpArg.consumed;
+      continue;
+    }
+    const phpBinArg = readArgValue(argv, i, "--php-bin");
+    if (phpBinArg) {
+      phpBin = String(phpBinArg.value).trim();
+      i += phpBinArg.consumed;
+      continue;
+    }
+    if (arg === "--enforce-target-php") {
+      enforceTargetPhp = true;
+      continue;
+    }
+    if (arg === "--no-enforce-target-php") {
+      enforceTargetPhp = false;
       continue;
     }
     if (arg === "--profile") {
@@ -145,6 +161,8 @@ export function parseClosedProfileFlags(argv = []) {
       minifyAssets,
       skipZip,
       targetPhp,
+      phpBin,
+      enforceTargetPhp,
     };
   }
 
@@ -158,6 +176,8 @@ export function parseClosedProfileFlags(argv = []) {
     minifyAssets: minifyAssets ?? (profile === "s"),
     skipZip,
     targetPhp,
+    phpBin,
+    enforceTargetPhp,
   };
 }
 
@@ -596,7 +616,68 @@ export async function secureUnlinkSymbolMap(mapFile) {
   await rm(mapFile, { force: true });
 }
 
-export async function validatePhpSyntaxTree(dir, { phpBin = process.env.WPDEV_PHP74_BIN || "php" } = {}) {
+export async function resolveAndValidateTargetPhpInterpreter({
+  targetPhp = "7.4",
+  phpBin,
+  enforceTarget = false,
+} = {}) {
+  const envTargetBin =
+    process.env[`WPDEV_PHP${targetPhp.replace(".", "")}_BIN`] ||
+    process.env.WPDEV_PHP_TARGET_BIN ||
+    (targetPhp === "7.4" ? process.env.WPDEV_PHP74_BIN : undefined);
+
+  const selectedBin = phpBin || envTargetBin || "php";
+
+  let stdout = "";
+  try {
+    const res = await execFileAsync(selectedBin, [
+      "-d",
+      "xdebug.mode=off",
+      "-r",
+      "echo PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION;",
+    ]);
+    stdout = String(res.stdout || "").trim();
+  } catch (err) {
+    throw new Error(
+      `Target PHP interpreter '${selectedBin}' failed execution: ${err.message}`,
+    );
+  }
+
+  const actualVersion = stdout;
+  const matchesTarget = actualVersion === targetPhp;
+
+  if (enforceTarget && !matchesTarget) {
+    throw new Error(
+      `Target PHP interpreter '${selectedBin}' version mismatch: expected PHP ${targetPhp}, got PHP ${actualVersion}`,
+    );
+  }
+
+  if (envTargetBin && !matchesTarget) {
+    throw new Error(
+      `Target PHP interpreter '${selectedBin}' configured via environment has version mismatch: expected PHP ${targetPhp}, got PHP ${actualVersion}`,
+    );
+  }
+
+  return {
+    bin: selectedBin,
+    version: actualVersion,
+    isExactTarget: matchesTarget,
+  };
+}
+
+export async function validatePhpSyntaxTree(
+  dir,
+  {
+    phpBin,
+    targetPhp = "7.4",
+    enforceTarget = false,
+  } = {}
+) {
+  const interpreter = await resolveAndValidateTargetPhpInterpreter({
+    targetPhp,
+    phpBin,
+    enforceTarget,
+  });
   const phpValidatorScript = `
   $dir = $argv[1];
   $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, RecursiveDirectoryIterator::SKIP_DOTS));
@@ -656,6 +737,15 @@ export async function validatePhpSyntaxTree(dir, { phpBin = process.env.WPDEV_PH
               break;
           }
 
+          if ($tokenId === $ellipsisId || $tokenText === '...') {
+              $pi = $prevSig($tokens, $i);
+              $ni = $nextSig($tokens, $i, $count);
+              if ($pi !== null && $ni !== null && $tokens[$pi] === '(' && $tokens[$ni] === ')') {
+                  $errors[] = $path . ': PHP 7.4 incompatibility: first-class callable syntax (...) detected';
+                  break;
+              }
+          }
+
           if ($tokenId === $attrId) {
               $attrTokens = [];
               $j = $i + 1;
@@ -687,6 +777,17 @@ export async function validatePhpSyntaxTree(dir, { phpBin = process.env.WPDEV_PH
                   if ($depth > 0) $paramTokens[] = $tokens[$i];
                   $i++;
               }
+              $lastSigParam = null;
+              for ($k = count($paramTokens) - 1; $k >= 0; $k--) {
+                  $t = $paramTokens[$k];
+                  if (is_array($t) && in_array($t[0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) continue;
+                  $lastSigParam = is_array($t) ? $t[1] : $t;
+                  break;
+              }
+              if ($lastSigParam === ',') {
+                  $errors[] = $path . ': PHP 7.4 incompatibility: trailing comma detected in parameter list';
+                  break;
+              }
               $inDefault = false;
               $visibilityTokens = [T_PUBLIC, T_PROTECTED, T_PRIVATE];
               if (defined('T_READONLY')) $visibilityTokens[] = constant('T_READONLY');
@@ -695,6 +796,10 @@ export async function validatePhpSyntaxTree(dir, { phpBin = process.env.WPDEV_PH
                   $ptText = is_array($pt) ? $pt[1] : $pt;
                   if ($pt === '=') $inDefault = true;
                   elseif ($pt === ',') $inDefault = false;
+                  elseif ($inDefault && ($ptId === T_NEW || $ptText === 'new')) {
+                      $errors[] = $path . ': PHP 7.4 incompatibility: new in initializer detected in parameter default';
+                      break;
+                  }
                   elseif (!$inDefault && $pt === '|') {
                       $errors[] = $path . ': PHP 7.4 incompatibility: union type parameter detected in function declaration';
                       break;
@@ -703,7 +808,7 @@ export async function validatePhpSyntaxTree(dir, { phpBin = process.env.WPDEV_PH
                   // Note: 'static' tokenizes as T_STATIC, not T_STRING.
                   if (!$inDefault && ($ptId === T_STRING || (defined('T_STATIC') && $ptId === constant('T_STATIC')))) {
                       $lowerPt = strtolower($ptText);
-                      if (in_array($lowerPt, ['mixed', 'never', 'static'], true)) {
+                      if (in_array($lowerPt, ['mixed', 'never', 'static', 'false', 'true', 'null'], true)) {
                           $errors[] = $path . ': PHP 7.4 incompatibility: ' . $ptText . ' type detected in parameter list';
                           break;
                       }
@@ -827,7 +932,7 @@ export async function validatePhpSyntaxTree(dir, { phpBin = process.env.WPDEV_PH
   }
   echo "SYNTAX_OK\\n";
   `;
-  const { stdout, stderr } = await execFileAsync(phpBin, ["-d", "xdebug.mode=off", "-r", phpValidatorScript, "--", dir]);
+  const { stdout, stderr } = await execFileAsync(interpreter.bin, ["-d", "xdebug.mode=off", "-r", phpValidatorScript, "--", dir]);
   if (!stdout.includes("SYNTAX_OK")) {
     throw new Error(`PHP syntax error in transformed files: ${stdout || stderr}`);
   }

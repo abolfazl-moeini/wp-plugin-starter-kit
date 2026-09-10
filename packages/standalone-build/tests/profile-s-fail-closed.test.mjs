@@ -15,6 +15,7 @@ import {
   parseClosedProfileFlags,
   parseTransformerBatchLog,
   requireRectorForProfileS,
+  resolveAndValidateTargetPhpInterpreter,
   validatePhpSyntaxTree,
 } from "../profile-s-fail-closed.mjs";
 import {
@@ -136,6 +137,79 @@ test("validatePhpSyntaxTree rejects leftover PHP 8 tokens after a skipped downgr
     );
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("validatePhpSyntaxTree rejects all PHP 8.0-8.2 syntax counterexamples on PHP 7.4 target (V3-16)", async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "php74-counterexamples-"));
+  try {
+    // Counterexample 1: standalone false type (PHP 8.2)
+    const file1 = path.join(tmpDir, "false_param.php");
+    await writeFile(file1, "<?php\nfunction ready(false $value) {}\n");
+    await assert.rejects(
+      () => validatePhpSyntaxTree(tmpDir),
+      /PHP 7\.4 incompatibility: false type detected in parameter list/,
+    );
+    await rm(file1);
+
+    // Counterexample 2: trailing parameter comma (PHP 8.0)
+    const file2 = path.join(tmpDir, "trailing_comma.php");
+    await writeFile(file2, "<?php\nfunction ready($value,) {}\n");
+    await assert.rejects(
+      () => validatePhpSyntaxTree(tmpDir),
+      /PHP 7\.4 incompatibility: trailing comma detected in parameter list/,
+    );
+    await rm(file2);
+
+    // Counterexample 3: first-class callable syntax (PHP 8.1)
+    const file3 = path.join(tmpDir, "first_class_callable.php");
+    await writeFile(file3, "<?php\n$f = strlen(...);\n");
+    await assert.rejects(
+      () => validatePhpSyntaxTree(tmpDir),
+      /PHP 7\.4 incompatibility: first-class callable syntax \(\.\.\.\) detected/,
+    );
+    await rm(file3);
+
+    // Counterexample 4: new in initializer (PHP 8.1)
+    const file4 = path.join(tmpDir, "new_in_init.php");
+    await writeFile(file4, "<?php\nfunction ready($value = new stdClass) {}\n");
+    await assert.rejects(
+      () => validatePhpSyntaxTree(tmpDir),
+      /PHP 7\.4 incompatibility: new in initializer detected in parameter default/,
+    );
+    await rm(file4);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("resolveAndValidateTargetPhpInterpreter validates binary version and fails closed (V3-16)", async () => {
+  // 1. Missing binary fails closed
+  await assert.rejects(
+    () => resolveAndValidateTargetPhpInterpreter({ targetPhp: "7.4", phpBin: "/nonexistent/php74" }),
+    /Target PHP interpreter '\/nonexistent\/php74' failed execution/,
+  );
+
+  // 2. Host PHP with enforceTarget: true fails when target is 7.4 and host is PHP 8.x
+  await assert.rejects(
+    () => resolveAndValidateTargetPhpInterpreter({ targetPhp: "7.4", phpBin: "php", enforceTarget: true }),
+    /Target PHP interpreter 'php' version mismatch: expected PHP 7.4, got PHP/,
+  );
+
+  // 3. Env var configured with wrong version fails closed
+  const prevEnv = process.env.WPDEV_PHP74_BIN;
+  try {
+    process.env.WPDEV_PHP74_BIN = "php";
+    await assert.rejects(
+      () => resolveAndValidateTargetPhpInterpreter({ targetPhp: "7.4" }),
+      /Target PHP interpreter 'php' configured via environment has version mismatch: expected PHP 7.4, got PHP/,
+    );
+  } finally {
+    if (prevEnv !== undefined) {
+      process.env.WPDEV_PHP74_BIN = prevEnv;
+    } else {
+      delete process.env.WPDEV_PHP74_BIN;
+    }
   }
 });
 
