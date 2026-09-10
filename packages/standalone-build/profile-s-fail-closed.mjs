@@ -288,7 +288,106 @@ export function assertSymbolMapHasNoCollisions(symMap, options = {}) {
     false
   );
   const symbolPaths = options.symbolPaths || symMap.symbolPaths || symMap.__symbolPaths || {};
+  const classesMeta = options.classesMeta || symMap.classes_meta || symMap.__classes_meta || {};
+  const declarations = Array.isArray(options.declarations)
+    ? options.declarations
+    : Array.isArray(symMap.declarations)
+      ? symMap.declarations
+      : null;
+  const retainedNamespaces = new Set(
+    Array.isArray(options.retainedNamespaces)
+      ? options.retainedNamespaces
+      : Array.isArray(symMap.retained_namespaces)
+        ? symMap.retained_namespaces
+        : (symMap.retained_namespaces && typeof symMap.retained_namespaces === "object")
+          ? Object.keys(symMap.retained_namespaces)
+          : []
+  );
+
   let totalChecked = 0;
+
+  // 1. If typed declaration records are provided, validate declaration-level collision gate (V3-04)
+  if (declarations && declarations.length > 0) {
+    const declsByCategoryAndDest = {
+      classes: new Map(),
+      functions: new Map(),
+      constants: new Map(),
+    };
+
+    for (const decl of declarations) {
+      const fqcn = String(decl.fqcn || decl.symbol || "").trim();
+      if (!fqcn) continue;
+      const isAlias = Boolean(decl.isAlias ?? decl.is_alias ?? false);
+      const isGlobal = Boolean(
+        decl.isGlobal ??
+        decl.is_global ??
+        (!decl.namespace && !fqcn.includes("\\"))
+      );
+      const ns = decl.namespace !== undefined
+        ? String(decl.namespace || "").trim()
+        : (fqcn.includes("\\") ? fqcn.slice(0, fqcn.lastIndexOf("\\")) : "");
+      const shortName = String(
+        decl.name || (fqcn.includes("\\") ? fqcn.slice(fqcn.lastIndexOf("\\") + 1) : fqcn)
+      ).trim();
+      const kind = String(decl.kind || "class").toLowerCase();
+
+      let category = "classes";
+      if (kind === "function") {
+        category = "functions";
+      } else if (kind === "constant") {
+        category = "constants";
+      }
+      const caseInsensitive = category === "classes" || category === "functions";
+
+      // Compute effective destination if not explicit
+      let dest = decl.effectiveDestination;
+      if (!dest) {
+        const table = (symMap[category] && typeof symMap[category] === "object") ? symMap[category] : {};
+        const isFlattened = checkFlattenCollisions && (!ns || !retainedNamespaces.has(ns));
+        if (isFlattened) {
+          if (table[fqcn]) {
+            const mapped = String(table[fqcn]).replace(/^\\/, "");
+            dest = mapped.includes("\\") ? mapped.slice(mapped.lastIndexOf("\\") + 1) : mapped;
+          } else {
+            dest = shortName;
+          }
+        } else {
+          if (table[fqcn]) {
+            dest = String(table[fqcn]).replace(/^\\/, "");
+          } else {
+            dest = fqcn;
+          }
+        }
+      }
+
+      if (!isAlias) {
+        const destKey = caseInsensitive ? dest.toLowerCase() : dest;
+        const categoryMap = declsByCategoryAndDest[category];
+
+        if (categoryMap.has(destKey)) {
+          const existing = categoryMap.get(destKey);
+          const existingPath = existing.file
+            ? `${existing.fqcn} (${existing.file}${existing.line ? `:${existing.line}` : ""})`
+            : (symbolPaths[existing.fqcn] ? `${existing.fqcn} (${symbolPaths[existing.fqcn]})` : existing.fqcn);
+          const currentPath = decl.file
+            ? `${fqcn} (${decl.file}${decl.line ? `:${decl.line}` : ""})`
+            : (symbolPaths[fqcn] ? `${fqcn} (${symbolPaths[fqcn]})` : fqcn);
+
+          const reason = checkFlattenCollisions ? "under namespace flattening" : "under symbol mapping";
+          const existingDesc = existing.isGlobal ? "global" : "namespaced";
+          const currentDesc = isGlobal ? "global" : "namespaced";
+
+          throw new Error(
+            `symbol map collision in ${category}: ${existingDesc} declaration '${existing.fqcn}' and ${currentDesc} declaration '${fqcn}' collide on effective destination '${dest}' ${reason}: [${existingPath}, ${currentPath}]`
+          );
+        }
+        categoryMap.set(destKey, { ...decl, fqcn, isGlobal, file: decl.file, line: decl.line });
+      }
+      totalChecked++;
+    }
+  }
+
+  // 2. Validate section tables (classes, functions, constants)
   for (const section of ["classes", "functions", "constants"]) {
     const table = symMap[section] && typeof symMap[section] === "object" ? symMap[section] : {};
     const fqcnsByMangled = new Map();
@@ -371,8 +470,36 @@ export function assertSymbolMapHasNoCollisions(symMap, options = {}) {
             `symbol map collision in ${section}: ${fqcn} and ${symbol} both mangle to ${mangled}`,
           );
         }
-        // Valid short alias of the same class.
+        // V3-04: Check if symbol is a distinct declaration rather than a short alias
+        const isDistinctDeclaration = Boolean(
+          (symbolPaths[symbol] && symbolPaths[fqcn] && symbolPaths[symbol] !== symbolPaths[fqcn]) ||
+          (classesMeta[symbol] && classesMeta[fqcn])
+        );
+        if (isDistinctDeclaration && checkFlattenCollisions) {
+          const path1 = symbolPaths[fqcn] ? `${fqcn} (${symbolPaths[fqcn]})` : fqcn;
+          const path2 = symbolPaths[symbol] ? `${symbol} (${symbolPaths[symbol]})` : symbol;
+          throw new Error(
+            `symbol map collision in ${section}: global declaration '${symbol}' collides with namespaced declaration '${fqcn}' under namespace flattening: [${path2}, ${path1}]`,
+          );
+        }
+        if (isDistinctDeclaration) {
+          totalChecked++;
+        }
       } else {
+        if (checkFlattenCollisions && shortNamesToFqcns.has(shortKey)) {
+          const collidingFqcns = shortNamesToFqcns.get(shortKey) || [];
+          const isDistinctDeclaration = Boolean(
+            (symbolPaths[symbol] && collidingFqcns.some((f) => symbolPaths[f] && symbolPaths[f] !== symbolPaths[symbol])) ||
+            classesMeta[symbol]
+          );
+          if (isDistinctDeclaration) {
+            const path1 = symbolPaths[collidingFqcns[0]] ? `${collidingFqcns[0]} (${symbolPaths[collidingFqcns[0]]})` : collidingFqcns[0];
+            const path2 = symbolPaths[symbol] ? `${symbol} (${symbolPaths[symbol]})` : symbol;
+            throw new Error(
+              `symbol map collision in ${section}: global declaration '${symbol}' collides with namespaced declaration '${collidingFqcns[0]}' under namespace flattening: [${path2}, ${path1}]`,
+            );
+          }
+        }
         if (globalsByMangled.has(mangledKey)) {
           const existing = globalsByMangled.get(mangledKey);
           const isSameSymbol = caseInsensitive

@@ -8,6 +8,7 @@ import test from "node:test";
 import crypto from "node:crypto";
 import zlib from "node:zlib";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import {
   readZipEntries,
@@ -17,6 +18,8 @@ import {
   MAX_ENTRY_UNCOMPRESSED_BYTES,
   MAX_MANIFEST_UNCOMPRESSED_BYTES,
 } from "../canonical-artifact-manifest.mjs";
+
+const manifestModulePath = fileURLToPath(new URL("../canonical-artifact-manifest.mjs", import.meta.url));
 
 const execFileAsync = promisify(execFile);
 
@@ -138,7 +141,7 @@ test("F14: Child process rejects zip bomb stream without host OOM or uncaught ex
 
     const script = `
       import fs from "node:fs";
-      import { readZipEntries } from "${path.resolve("canonical-artifact-manifest.mjs")}";
+      import { readZipEntries } from "${manifestModulePath}";
       const buf = fs.readFileSync("${zipFile}");
       try {
         readZipEntries(buf);

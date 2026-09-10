@@ -39,6 +39,8 @@ class Plan3_Transformer {
 	public $function_declarations = array();
 	public $short_func_counts  = array();
 	public $symbols_analyzed   = false;
+	public $declarations       = array();
+	public $symbol_paths       = array();
 
 	public $private_members = array(
 		'methods'    => array(),
@@ -1149,9 +1151,24 @@ class Plan3_Transformer {
 					}
 					if ( $next < $count && is_array( $tokens[ $next ] ) && $tokens[ $next ][0] === T_STRING ) {
 						$class_name = $tokens[ $next ][1];
-						$hash_key = ! empty( $current_namespace ) ? ( $current_namespace . '\\' . $class_name ) : $class_name;
+						$class_line = isset( $tokens[ $next ][2] ) ? $tokens[ $next ][2] : 1;
+						$hash_key   = ! empty( $current_namespace ) ? ( $current_namespace . '\\' . $class_name ) : $class_name;
 						$this->class_kinds[ $hash_key ] = $kind;
-						if ( in_array( $class_name, self::$frozen_public_classes, true ) ) {
+						$is_frozen = in_array( $class_name, self::$frozen_public_classes, true );
+						$this->symbol_paths[ $hash_key ] = $path . ':' . $class_line;
+						$this->declarations[] = array(
+							'symbol'               => $hash_key,
+							'name'                 => $class_name,
+							'namespace'            => $current_namespace,
+							'kind'                 => $kind,
+							'file'                 => $path,
+							'line'                 => $class_line,
+							'is_global'            => empty( $current_namespace ),
+							'is_alias'             => false,
+							'frozen'               => $is_frozen,
+							'effectiveDestination' => ! $this->mangle_symbols || $is_frozen ? $class_name : '',
+						);
+						if ( $is_frozen ) {
 							continue;
 						}
 
@@ -1238,22 +1255,35 @@ class Plan3_Transformer {
 							$next++;
 						}
 						if ( $next < $count && is_array( $tokens[ $next ] ) && $tokens[ $next ][0] === T_STRING ) {
-							$func_name = $tokens[ $next ][1];
-							if ( strpos( $func_name, 'wpdev_' ) === 0 || strpos( $func_name, '_wpdev_' ) === 0 || strpos( $func_name, 'tavangary_' ) === 0 ) {
-								continue;
-							}
-							if ( in_array( strtolower( $func_name ), array_map( 'strtolower', self::$reserved_funcs ), true ) ) {
+							$func_name   = $tokens[ $next ][1];
+							$func_line   = isset( $tokens[ $next ][2] ) ? $tokens[ $next ][2] : 1;
+							$fqfn        = ! empty( $current_namespace ) ? ( $current_namespace . '\\' . $func_name ) : $func_name;
+							$is_reserved = in_array( strtolower( $func_name ), array_map( 'strtolower', self::$reserved_funcs ), true )
+								|| strpos( $func_name, 'wpdev_' ) === 0 || strpos( $func_name, '_wpdev_' ) === 0 || strpos( $func_name, 'tavangary_' ) === 0;
+							$this->symbol_paths[ $fqfn ] = $path . ':' . $func_line;
+							$this->declarations[] = array(
+								'symbol'               => $fqfn,
+								'name'                 => $func_name,
+								'namespace'            => $current_namespace,
+								'kind'                 => 'function',
+								'file'                 => $path,
+								'line'                 => $func_line,
+								'is_global'            => empty( $current_namespace ),
+								'is_alias'             => false,
+								'frozen'               => $is_reserved,
+								'effectiveDestination' => ! $this->mangle_symbols || $is_reserved ? $func_name : '',
+							);
+							if ( $is_reserved ) {
 								continue;
 							}
 							if ( ! $this->mangle_symbols ) {
 								continue;
 							}
-							$fqfn = ! empty( $current_namespace ) ? ( $current_namespace . '\\' . $func_name ) : $func_name;
 							$this->function_declarations[] = array(
 								'fqfn'      => $fqfn,
 								'namespace' => $current_namespace,
 								'name'      => $func_name,
-								'file'      => $file_path,
+								'file'      => $path,
 							);
 							$mangled = '_f_' . substr( hash( 'sha256', $this->seed . ':func:' . strtolower( $fqfn ) ), 0, 8 );
 
@@ -1278,6 +1308,39 @@ class Plan3_Transformer {
 									$this->global_function_map[ strtolower( $func_name ) ] = $mangled;
 								}
 							}
+						}
+					}
+				} elseif ( $id === T_CONST && $class_depth === 0 && $in_class === 0 ) {
+					$prev_const = $i - 1;
+					while ( $prev_const >= 0 && is_array( $tokens[ $prev_const ] ) && $tokens[ $prev_const ][0] === T_WHITESPACE ) {
+						$prev_const--;
+					}
+					$vis = array( T_PUBLIC, T_PROTECTED, T_PRIVATE );
+					if ( defined( 'T_FINAL' ) ) {
+						$vis[] = T_FINAL;
+					}
+					if ( $prev_const < 0 || ! is_array( $tokens[ $prev_const ] ) || ! in_array( $tokens[ $prev_const ][0], $vis, true ) ) {
+						$next = $i + 1;
+						while ( $next < $count && is_array( $tokens[ $next ] ) && $tokens[ $next ][0] === T_WHITESPACE ) {
+							$next++;
+						}
+						if ( $next < $count && is_array( $tokens[ $next ] ) && $tokens[ $next ][0] === T_STRING ) {
+							$const_name = $tokens[ $next ][1];
+							$const_line = isset( $tokens[ $next ][2] ) ? $tokens[ $next ][2] : 1;
+							$fqcn_const = ! empty( $current_namespace ) ? ( $current_namespace . '\\' . $const_name ) : $const_name;
+							$this->symbol_paths[ $fqcn_const ] = $path . ':' . $const_line;
+							$this->declarations[] = array(
+								'symbol'               => $fqcn_const,
+								'name'                 => $const_name,
+								'namespace'            => $current_namespace,
+								'kind'                 => 'constant',
+								'file'                 => $path,
+								'line'                 => $const_line,
+								'is_global'            => empty( $current_namespace ),
+								'is_alias'             => false,
+								'frozen'               => false,
+								'effectiveDestination' => ! $this->mangle_symbols ? $const_name : '',
+							);
 						}
 					}
 				}
@@ -2514,6 +2577,8 @@ if ( isset( $argv[0] ) && basename( $argv[0] ) === 'transformer.php' ) {
 			'class_hierarchy'      => $transformer->class_hierarchy,
 			'project_global_vars'  => $transformer->project_global_vars,
 			'classes_meta'         => $transformer->classes,
+			'declarations'         => $transformer->declarations,
+			'symbolPaths'          => $transformer->symbol_paths,
 			'retained_namespaces'  => $transformer->retained_namespaces,
 			'__flattenNamespaces'  => $transformer->flatten_namespaces,
 			'__mangleSymbols'      => $transformer->mangle_symbols,

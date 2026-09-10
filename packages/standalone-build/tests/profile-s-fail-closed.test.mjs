@@ -400,3 +400,187 @@ test("assertSymbolMapHasNoCollisions enforces C1 fail-closed on namespace flatte
     /short-name collision under namespace flattening: 'user' is shared by multiple FQCNs: \[Acme\\User \(src\/Acme\/User\.php\), Beta\\User \(src\/Beta\/User\.php\)\]/,
   );
 });
+
+test("assertSymbolMapHasNoCollisions rejects real global declaration vs namespaced declaration under flattening (V3-04)", () => {
+  // 1. Flatten-only / spaghetti-only mode with symbolPaths: global Worker + Acme\Worker
+  const flatCollidingMap = {
+    classes: {
+      "Acme\\Worker": "Worker",
+      Worker: "Worker",
+    },
+  };
+
+  // In non-flattening mode, distinct namespaces do not collide even with symbolPaths
+  assert.equal(
+    assertSymbolMapHasNoCollisions(flatCollidingMap, {
+      checkFlattenCollisions: false,
+      symbolPaths: {
+        Worker: "src/Worker.php:10",
+        "Acme\\Worker": "src/Acme/Worker.php:25",
+      },
+    }),
+    2,
+  );
+
+  // In flatten-only mode with symbolPaths, fails closed with path diagnostics
+  assert.throws(
+    () =>
+      assertSymbolMapHasNoCollisions(flatCollidingMap, {
+        checkFlattenCollisions: true,
+        symbolPaths: {
+          Worker: "src/Worker.php:10",
+          "Acme\\Worker": "src/Acme/Worker.php:25",
+        },
+      }),
+    /symbol map collision in classes.*global declaration 'Worker'.*collides with namespaced declaration 'Acme\\Worker' under namespace flattening: \[Worker \(src\/Worker\.php:10\), Acme\\Worker \(src\/Acme\/Worker\.php:25\)\]/,
+  );
+
+  // 2. Typed declaration records: global Worker + Acme\Worker with effective destinations
+  const declCollidingMap = {
+    classes: {
+      "Acme\\Worker": "Worker",
+      Worker: "Worker",
+    },
+    declarations: [
+      {
+        symbol: "Worker",
+        name: "Worker",
+        namespace: "",
+        kind: "class",
+        file: "src/Worker.php",
+        line: 10,
+        is_global: true,
+        is_alias: false,
+        effectiveDestination: "Worker",
+      },
+      {
+        symbol: "Acme\\Worker",
+        name: "Worker",
+        namespace: "Acme",
+        kind: "class",
+        file: "src/Acme/Worker.php",
+        line: 25,
+        is_global: false,
+        is_alias: false,
+        effectiveDestination: "Worker",
+      },
+    ],
+  };
+
+  assert.throws(
+    () =>
+      assertSymbolMapHasNoCollisions(declCollidingMap, {
+        checkFlattenCollisions: true,
+      }),
+    /symbol map collision in classes.*global declaration 'Worker' and namespaced declaration 'Acme\\Worker' collide on effective destination 'Worker' under namespace flattening: \[Worker \(src\/Worker\.php:10\), Acme\\Worker \(src\/Acme\/Worker\.php:25\)\]/,
+  );
+
+  // 3. Case variants in declarations (e.g. Worker vs worker)
+  const caseCollidingMap = {
+    classes: {},
+    declarations: [
+      {
+        symbol: "Worker",
+        name: "Worker",
+        namespace: "",
+        kind: "class",
+        file: "src/Worker.php",
+        line: 10,
+        is_global: true,
+        is_alias: false,
+        effectiveDestination: "Worker",
+      },
+      {
+        symbol: "Acme\\worker",
+        name: "worker",
+        namespace: "Acme",
+        kind: "class",
+        file: "src/Acme/worker.php",
+        line: 15,
+        is_global: false,
+        is_alias: false,
+        effectiveDestination: "worker",
+      },
+    ],
+  };
+
+  assert.throws(
+    () =>
+      assertSymbolMapHasNoCollisions(caseCollidingMap, {
+        checkFlattenCollisions: true,
+      }),
+    /symbol map collision in classes.*collide on effective destination 'worker' under namespace flattening/,
+  );
+
+  // 4. Function collisions under flattening
+  const funcCollidingMap = {
+    functions: {},
+    declarations: [
+      {
+        symbol: "helper",
+        name: "helper",
+        namespace: "",
+        kind: "function",
+        file: "src/functions.php",
+        line: 5,
+        is_global: true,
+        is_alias: false,
+        effectiveDestination: "helper",
+      },
+      {
+        symbol: "Acme\\helper",
+        name: "helper",
+        namespace: "Acme",
+        kind: "function",
+        file: "src/Acme/functions.php",
+        line: 8,
+        is_global: false,
+        is_alias: false,
+        effectiveDestination: "helper",
+      },
+    ],
+  };
+
+  assert.throws(
+    () =>
+      assertSymbolMapHasNoCollisions(funcCollidingMap, {
+        checkFlattenCollisions: true,
+      }),
+    /symbol map collision in functions.*global declaration 'helper' and namespaced declaration 'Acme\\helper' collide on effective destination 'helper' under namespace flattening/,
+  );
+
+  // 5. Valid short alias does NOT throw when it's marked as an alias
+  const aliasMap = {
+    classes: {
+      "Acme\\Worker": "Worker",
+      Worker: "Worker",
+    },
+    declarations: [
+      {
+        symbol: "Acme\\Worker",
+        name: "Worker",
+        namespace: "Acme",
+        kind: "class",
+        file: "src/Acme/Worker.php",
+        line: 25,
+        is_global: false,
+        is_alias: false,
+        effectiveDestination: "Worker",
+      },
+      {
+        symbol: "Worker",
+        name: "Worker",
+        namespace: "",
+        kind: "class",
+        file: "src/Acme/Worker.php",
+        line: 25,
+        is_global: false,
+        is_alias: true, // explicit alias status
+        effectiveDestination: "Worker",
+      },
+    ],
+  };
+
+  // With alias status marked, alias does not collide with declaration
+  assert.equal(assertSymbolMapHasNoCollisions(aliasMap, { checkFlattenCollisions: true }), 3);
+});
