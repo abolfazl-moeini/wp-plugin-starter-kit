@@ -1564,7 +1564,7 @@ export function validateBuildCacheSchema(data, options = {}) {
     if (typeof record.manifestDigest !== "string" || !/^[a-f0-9]{64}$/.test(record.manifestDigest)) {
       return { valid: false, reason: `Artifact record for '${consumer}' has invalid manifestDigest` };
     }
-    if (typeof record.compositeFingerprint !== "string" || !/^(?:[a-f0-9]{64})(?::[a-f0-9]{64}){0,4}(?::profile:[a-z0-9_-]+)?(?::opts:[a-f0-9]{1,32})?$/i.test(record.compositeFingerprint)) {
+    if (typeof record.compositeFingerprint !== "string" || !/^(?:[a-f0-9]{64})(?::[a-f0-9]{64}){0,4}(?::profile:[a-z0-9_-]+)?(?::plan:[a-f0-9]{64})?(?::opts:[a-f0-9]{1,32})?$/i.test(record.compositeFingerprint)) {
       return { valid: false, reason: `Artifact record for '${consumer}' has invalid compositeFingerprint` };
     }
 
@@ -1782,6 +1782,7 @@ export function createTargetCacheRecord({
   themeFingerprint,
   toolchainFingerprint,
   compositeFingerprint,
+  planFingerprint = null,
   zipSha256,
   manifestDigest,
   gates = {},
@@ -1837,6 +1838,7 @@ export function createTargetCacheRecord({
     themeFingerprint: themeFingerprint || "",
     toolchainFingerprint: toolchainFingerprint || "",
     compositeFingerprint: compositeFingerprint || "",
+    planFingerprint: planFingerprint || null,
     zipSha256: zipSha256 || "",
     manifestDigest: manifestDigest || "",
     validationState: resolvedValidationState,
@@ -1963,6 +1965,7 @@ export async function validateCachedTargetArtifact({
   consumer,
   expectedCompositeFingerprint,
   expectedProfile = null,
+  expectedPlanFingerprint = null,
 }) {
   if (!cacheRecord || typeof cacheRecord !== "object") {
     return { valid: false, reason: "Cache record is missing or invalid object" };
@@ -1978,6 +1981,10 @@ export async function validateCachedTargetArtifact({
 
   if (cacheRecord.compositeFingerprint !== expectedCompositeFingerprint) {
     return { valid: false, reason: "Composite source/toolchain fingerprint changed" };
+  }
+
+  if (expectedPlanFingerprint && cacheRecord.planFingerprint && cacheRecord.planFingerprint !== expectedPlanFingerprint) {
+    return { valid: false, reason: `Plan fingerprint mismatch: expected ${expectedPlanFingerprint}, cache has ${cacheRecord.planFingerprint}` };
   }
 
   if (expectedProfile) {
@@ -2023,6 +2030,13 @@ export async function validateCachedTargetArtifact({
     const embProf = (embRaw === "s" || embRaw === "profile s") ? "profile s" : embRaw;
     if (embProf && embProf !== normReq) {
       return { valid: false, reason: `Profile mismatch: requested ${normReq}, embedded manifest has ${embProf}` };
+    }
+  }
+
+  if (expectedPlanFingerprint) {
+    const embPlan = embedded.manifest?.planFingerprint || embedded.manifest?.buildPlan?.artifactIdentity?.fingerprint;
+    if (embPlan && embPlan !== expectedPlanFingerprint) {
+      return { valid: false, reason: `Embedded manifest plan fingerprint mismatch: requested ${expectedPlanFingerprint}, embedded manifest has ${embPlan}` };
     }
   }
 
@@ -2181,13 +2195,12 @@ export async function computeTreeContentHash(
           entry.name === "unit-tests" ||
           entry.name === "dev" ||
           entry.name === "docs" ||
-          entry.name === "packages" ||
-          entry.name === "docker-phpunit" ||
-          entry.name === "vendor"
+          entry.name === "docker-phpunit"
         ) continue;
       }
 
       if (entry.isSymbolicLink()) {
+        if (relPath.startsWith("vendor/bin/") || relPath.endsWith("/bin") || relPath.includes("vendor/")) continue;
         throw new Error(`Symbolic links are forbidden in source tree: ${relPath}`);
       }
 
@@ -2399,22 +2412,31 @@ export function computePluginCompositeFingerprint({
   toolchainFingerprint = "",
   profile = "clean",
   options = {},
+  buildPlan = null,
 }) {
   const normTools = (toolsFingerprint && toolsFingerprint !== "missing") ? toolsFingerprint : "0".repeat(64);
   const normWpdev = (wpdevFingerprint && wpdevFingerprint !== "missing") ? wpdevFingerprint : "0".repeat(64);
   const normPlugin = (pluginSourceFingerprint && pluginSourceFingerprint !== "missing") ? pluginSourceFingerprint : "0".repeat(64);
   const normToolchain = (toolchainFingerprint && toolchainFingerprint !== "missing") ? toolchainFingerprint : "";
   const rawProfile = String(profile || "clean").toLowerCase().trim();
-  // Canonical profile identity: "s" and "Profile S" (and common aliases) are the
-  // same obfuscated tier. Everything else is "clean". Always included so that
-  // clean <-> S switches with identical sources can never reuse the same artifact.
-  const normProfile = (rawProfile === "s" || rawProfile === "profile s" || rawProfile === "profile-s" || rawProfile === "profiles" || rawProfile === "obfuscate" || rawProfile === "obfuscated") ? "s" : "clean";
+  // Canonical profile identity preserves distinct capability profiles
+  const normProfile = (rawProfile === "s" || rawProfile === "profile s" || rawProfile === "profile-s" || rawProfile === "profiles" || rawProfile === "obfuscate" || rawProfile === "obfuscated") ? "s" : rawProfile;
 
   const parts = [normTools, normWpdev, normPlugin];
   if (normToolchain) {
     parts.push(normToolchain);
   }
   parts.push(`profile:${normProfile}`);
+
+  const effectivePlanFingerprint = buildPlan?.artifactIdentity?.fingerprint
+    || options?.buildPlan?.artifactIdentity?.fingerprint
+    || options?.planFingerprint
+    || null;
+
+  if (effectivePlanFingerprint) {
+    parts.push(`plan:${effectivePlanFingerprint}`);
+  }
+
   if (options && typeof options === "object" && Object.keys(options).length > 0) {
     const encode = (value) => {
       if (value === undefined) return "null";
@@ -2423,9 +2445,11 @@ export function computePluginCompositeFingerprint({
       const innerKeys = Object.keys(value).sort();
       return `{${innerKeys.map((inner) => `${JSON.stringify(inner)}:${encode(value[inner])}`).join(",")}}`;
     };
-    const optKeys = Object.keys(options).sort();
-    const optStr = optKeys.map((k) => `${k}=${encode(options[k])}`).join(";");
-    parts.push(`opts:${crypto.createHash("sha256").update(optStr).digest("hex").slice(0, 16)}`);
+    const optKeys = Object.keys(options).filter((k) => k !== "buildPlan" && k !== "planFingerprint").sort();
+    if (optKeys.length > 0) {
+      const optStr = optKeys.map((k) => `${k}=${encode(options[k])}`).join(";");
+      parts.push(`opts:${crypto.createHash("sha256").update(optStr).digest("hex").slice(0, 16)}`);
+    }
   }
   return parts.join(":");
 }
@@ -2436,6 +2460,7 @@ export function planDependencyGraphBuild({
   currentFingerprints,
   mode = "changed", // "all", "changed", "force"
   profile = "clean",
+  pluginBuildPlans = null,
   options = {},
 }) {
   const plan = {};
@@ -2446,13 +2471,16 @@ export function planDependencyGraphBuild({
   for (const plugin of targetPlugins) {
     const prevPluginFingerprint = previousCache.artifacts?.[plugin]?.compositeFingerprint || previousCache[plugin];
     const currentPluginSource = currentFingerprints.plugins[plugin] || "missing";
+    const buildPlan = pluginBuildPlans?.[plugin] || options.buildPlan || null;
+    const effectiveProfile = buildPlan ? buildPlan.artifactIdentity.capabilityTag : profile;
     const compositeFingerprint = computePluginCompositeFingerprint({
       toolsFingerprint: currentFingerprints.tools,
       wpdevFingerprint: currentFingerprints.wpdev,
       pluginSourceFingerprint: currentPluginSource,
       toolchainFingerprint: currentFingerprints.toolchain || "",
-      profile,
+      profile: effectiveProfile,
       options,
+      buildPlan,
     });
 
     if (isForce) {

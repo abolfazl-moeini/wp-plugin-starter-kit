@@ -1287,7 +1287,28 @@ export async function runPipelineOrchestration(options = {}) {
   dag.addNode("plan", {
     dependencies: ["fingerprint"],
     task: async ({ fingerprint }) => {
-      const activeProfile = activeIsObfuscate ? "s" : "clean";
+      const parsedFlags = options.parsed || {};
+      const pluginBuildPlans = {};
+      for (const plugin of targetPlugins) {
+        pluginBuildPlans[plugin] = createBuildPlan({
+          consumer: plugin,
+          profile: parsedFlags.profile || (activeIsObfuscate ? "s" : "clean"),
+          isObfuscate: activeIsObfuscate,
+          obfuscate: parsedFlags.obfuscate,
+          inlineFramework: options.inlineFramework ?? parsedFlags.inlineFramework,
+          spaghetti: options.spaghetti ?? parsedFlags.spaghetti,
+          minifyAssets: options.minifyAssets ?? parsedFlags.minifyAssets,
+          skipZip: options.skipZip ?? parsedFlags.skipZip,
+          targetPhp: options.targetPhp ?? parsedFlags.targetPhp,
+          frozenClasses: options.frozenClasses ?? parsedFlags.frozenClasses,
+          frozenFunctions: options.frozenFunctions ?? parsedFlags.frozenFunctions,
+          frozenConstants: options.frozenConstants ?? parsedFlags.frozenConstants,
+          frozenProperties: options.frozenProperties ?? parsedFlags.frozenProperties,
+          frozenMethods: options.frozenMethods ?? parsedFlags.frozenMethods,
+          frozenVars: options.frozenVars ?? parsedFlags.frozenVars,
+        });
+      }
+
       return planDependencyGraphBuild({
         targetPlugins,
         previousCache: cache,
@@ -1298,7 +1319,8 @@ export async function runPipelineOrchestration(options = {}) {
           toolchain: fingerprint.toolchain,
         },
         mode: activeIsForce ? "force" : (activeIsChanged ? "changed" : "incremental"),
-        profile: activeProfile,
+        pluginBuildPlans,
+        profile: parsedFlags.profile || (activeIsObfuscate ? "s" : "clean"),
         options: options.buildOptions || {},
       });
     },
@@ -1323,17 +1345,21 @@ export async function runPipelineOrchestration(options = {}) {
           minifyAssets: options.minifyAssets ?? parsedFlags.minifyAssets,
           skipZip: options.skipZip ?? parsedFlags.skipZip,
           targetPhp: options.targetPhp ?? parsedFlags.targetPhp,
+          frozenClasses: options.frozenClasses ?? parsedFlags.frozenClasses,
+          frozenFunctions: options.frozenFunctions ?? parsedFlags.frozenFunctions,
+          frozenConstants: options.frozenConstants ?? parsedFlags.frozenConstants,
+          frozenProperties: options.frozenProperties ?? parsedFlags.frozenProperties,
+          frozenMethods: options.frozenMethods ?? parsedFlags.frozenMethods,
+          frozenVars: options.frozenVars ?? parsedFlags.frozenVars,
         });
         const activeProfile = pluginBuildPlan.capabilities.inlineFramework
           && pluginBuildPlan.capabilities.spaghetti
           && pluginBuildPlan.capabilities.obfuscate
           ? "s"
-          : "clean";
+          : pluginBuildPlan.artifactIdentity.capabilityTag;
         const targetZipPath = path.join(customDistDir, resolveArtifactZipName(pluginBuildPlan));
 
         const cachedArtifact = cache.artifacts?.[plugin];
-        // Always enforce profile identity: clean and S artifacts are never
-        // interchangeable, even for legacy cache records without profile info.
         const expectedProfile = activeProfile;
         const cacheValidation = await validateCachedTargetArtifact({
           cacheRecord: cachedArtifact,
@@ -1341,6 +1367,7 @@ export async function runPipelineOrchestration(options = {}) {
           consumer: plugin,
           expectedCompositeFingerprint: pluginPlan.compositeFingerprint,
           expectedProfile,
+          expectedPlanFingerprint: pluginBuildPlan.artifactIdentity.fingerprint,
         });
 
         if (!pluginPlan.shouldRebuild && cacheValidation.valid) {
@@ -1350,6 +1377,7 @@ export async function runPipelineOrchestration(options = {}) {
             plugin,
             artifactId: cachedArtifact.artifactId,
             composite: pluginPlan.compositeFingerprint,
+            planFingerprint: cachedArtifact.planFingerprint || pluginBuildPlan.artifactIdentity.fingerprint,
             zipSha256: cachedArtifact.zipSha256,
             manifestDigest: cachedArtifact.manifestDigest,
           };
@@ -1436,6 +1464,7 @@ export async function runPipelineOrchestration(options = {}) {
           plugin,
           artifactId: embedded.artifactId,
           composite: pluginPlan.compositeFingerprint,
+          planFingerprint: pluginBuildPlan.artifactIdentity.fingerprint,
           zipSha256,
           manifestDigest: embedded.manifestDigest,
         };
@@ -1669,6 +1698,7 @@ export async function runPipelineOrchestration(options = {}) {
             themeFingerprint: (fingerprint.theme && fingerprint.theme !== "missing") ? fingerprint.theme : "0".repeat(64),
             toolchainFingerprint: fingerprint.toolchain,
             compositeFingerprint: bRes.composite,
+            planFingerprint: bRes.planFingerprint || null,
             zipSha256: bRes.zipSha256,
             manifestDigest: bRes.manifestDigest,
             gates: {

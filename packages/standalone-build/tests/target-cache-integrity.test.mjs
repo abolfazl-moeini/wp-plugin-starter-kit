@@ -10,7 +10,10 @@ import {
   createTargetCacheRecord,
   validateCachedTargetArtifact,
   planDependencyGraphBuild,
+  computeTreeContentHash,
+  computePluginCompositeFingerprint,
 } from "../build-cache-engine.mjs";
+import { createBuildPlan } from "../build-plan.mjs";
 
 test("Target Cache: creates structured target cache record with schema and state", () => {
   const record = createTargetCacheRecord({
@@ -186,3 +189,102 @@ test("Target Cache: validateCachedTargetArtifact verifies valid hermetic ZIP and
 
   await fs.promises.rm(tmpDir, { recursive: true, force: true });
 });
+
+test("V3-15: computeTreeContentHash binds changes in packages/ and vendor/", async () => {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "cache-tree-v315-"));
+  try {
+    const pkgDir = path.join(tmpDir, "packages/framework/src");
+    await fs.promises.mkdir(pkgDir, { recursive: true });
+    await fs.promises.writeFile(path.join(pkgDir, "Runtime.php"), "<?php class Runtime {}");
+
+    const hash1 = await computeTreeContentHash(tmpDir, tmpDir, true);
+    assert.notEqual(hash1, "empty", "packages/ files must be included in tree hash");
+
+    await fs.promises.writeFile(path.join(pkgDir, "Runtime.php"), "<?php class Runtime { /* updated */ }");
+    const hash2 = await computeTreeContentHash(tmpDir, tmpDir, true);
+    assert.notEqual(hash1, hash2, "Editing packages/framework/src/Runtime.php must invalidate tree hash");
+
+    // Vendor test
+    const vendorDir = path.join(tmpDir, "vendor/my-dep");
+    await fs.promises.mkdir(vendorDir, { recursive: true });
+    await fs.promises.writeFile(path.join(vendorDir, "Dep.php"), "<?php class Dep {}");
+    const hash3 = await computeTreeContentHash(tmpDir, tmpDir, true);
+    assert.notEqual(hash2, hash3, "Vendor files must be included in tree hash");
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("V3-15: computePluginCompositeFingerprint and validateCachedTargetArtifact bind BuildPlan", async () => {
+  const planNoInline = createBuildPlan({
+    consumer: "demo",
+    inlineFramework: false,
+    spaghetti: false,
+    obfuscate: false,
+  });
+  const planInlineOnly = createBuildPlan({
+    consumer: "demo",
+    inlineFramework: true,
+    spaghetti: false,
+    obfuscate: false,
+  });
+  const planObfOnly = createBuildPlan({
+    consumer: "demo",
+    inlineFramework: false,
+    spaghetti: false,
+    obfuscate: true,
+  });
+
+  const fpNoInline = computePluginCompositeFingerprint({
+    toolsFingerprint: "0".repeat(64),
+    wpdevFingerprint: "0".repeat(64),
+    pluginSourceFingerprint: "0".repeat(64),
+    buildPlan: planNoInline,
+  });
+
+  const fpInlineOnly = computePluginCompositeFingerprint({
+    toolsFingerprint: "0".repeat(64),
+    wpdevFingerprint: "0".repeat(64),
+    pluginSourceFingerprint: "0".repeat(64),
+    buildPlan: planInlineOnly,
+  });
+
+  const fpObfOnly = computePluginCompositeFingerprint({
+    toolsFingerprint: "0".repeat(64),
+    wpdevFingerprint: "0".repeat(64),
+    pluginSourceFingerprint: "0".repeat(64),
+    buildPlan: planObfOnly,
+  });
+
+  // No-inline vs inline-only must have different fingerprints even with same source
+  assert.notEqual(fpNoInline, fpInlineOnly, "No-inline and inline-only must produce different composite fingerprints");
+  assert.notEqual(fpInlineOnly, fpObfOnly, "Inline-only and obfuscate-only must produce different composite fingerprints");
+
+  // validateCachedTargetArtifact rejects plan fingerprint mismatch
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "cache-validate-plan-"));
+  try {
+    const zipPath = path.join(tmpDir, "dummy.zip");
+    await fs.promises.writeFile(zipPath, "dummy");
+    const record = createTargetCacheRecord({
+      artifactId: "demo-profile-s",
+      consumer: "demo",
+      compositeFingerprint: fpNoInline,
+      planFingerprint: planNoInline.artifactIdentity.fingerprint,
+      zipSha256: "0".repeat(64),
+      manifestDigest: "0".repeat(64),
+    });
+
+    const valMismatch = await validateCachedTargetArtifact({
+      cacheRecord: record,
+      zipPath,
+      consumer: "demo",
+      expectedCompositeFingerprint: fpNoInline,
+      expectedPlanFingerprint: planObfOnly.artifactIdentity.fingerprint,
+    });
+    assert.equal(valMismatch.valid, false);
+    assert.ok(valMismatch.reason.includes("Plan fingerprint mismatch"));
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
