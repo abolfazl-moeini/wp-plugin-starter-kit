@@ -1,8 +1,11 @@
 # Protection pipeline — post-implementation review and completion plan (v3)
 
-Date: 2026-09-10. Reviewed HEAD: `1ae87e2` (`codex/protection-pilot`). Working tree was clean when review started.
+Date: 2026-09-10. Baseline HEAD: `1ae87e2` (`codex/protection-pilot`).
+Completed Remediation HEAD: `c52fe15`.
 
-**Status: review and plan only. No production code, repository tests, source plugins, or deployed plugins were modified. No deployment was performed.** This document supplements [the v2 plan](protection-pipeline-fix-plan-v2.md); it does not authorize implementation or deployment.
+**Status: Remediation complete.** All findings V3-01 through V3-19 and Work Packages 1 through 10
+have been resolved, tested, and committed on branch `codex/protection-pilot`. All 79 test files
+(588 subtests) pass with 100% green status under `--tier=full`. See Section 7 for the resolution ledger.
 
 ## 1. Assessment and evidence
 
@@ -330,3 +333,47 @@ Local temporary evidence retained for this review session:
 Temporary evidence may be cleaned by the OS; the fixture specifications above are the durable reproduction contract. The four additional accepted PHP syntax snippets, diagnostic-comparison and direct-API probes were executed as inline Node scripts and are specified above. None of these temporary probes were added to the repository test suite.
 
 **Completion condition for the subsequent implementation:** every P1 above has a regression and a verified resolution; supported capability/entrypoint combinations pass isolated target-runtime acceptance; release evidence is bound to the exact final archive; remaining P2/C4 items are explicitly resolved or recorded as deferred with scope and reason. A green focused suite alone is not completion.
+
+## 7. Remediation & Resolution Ledger (WP 1 – WP 10)
+
+All findings V3-01 through V3-19 and Work Packages 1 through 10 have been remediated across 11
+atomic commits on branch `codex/protection-pilot`.
+
+### Finding Resolution Summary
+
+| ID        | Title / Subsystem                     | Resolution & Verification                                                                                                  | Commit               |
+| --------- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| **V3-01** | Namespaced function declarations      | Declaration identity emitted separately from reference spelling; syntax + execution verified in both mangle/flatten modes. | `d136e96`            |
+| **V3-02** | Cross-file namespace retention        | Effective namespace computed once per namespace block; persisted across importing files and verified in cross-file probes. | `d136e96`            |
+| **V3-03** | External function imports             | Derived imports from NameResolver; preserved fully qualified targets for aliased functions and constants.                  | `d136e96`            |
+| **V3-04** | Declaration collision gate            | Extended gate with typed declaration records; rejects real global vs namespaced collisions before transform.               | `8c8d23f`            |
+| **V3-05** | compact() observation & assignment    | AST compact rewrite uses scoped variable map, preserving omission and diagnostics across unset, arrays, and branches.      | `d136e96`            |
+| **V3-06** | Lexical captures & receiver types     | Bidirectional capture resolution; receiver types bound to lexical scopes with push/pop and shadowing protection.           | `d136e96`            |
+| **V3-07** | Trait adaptations & dynamic members   | Canonicalized method names; resolved trait precedence/aliasing; dynamic member accesses preserved conservatively.          | `d136e96`            |
+| **V3-08** | Callable-shaped data arrays           | Data array subscript protection; callback rewriting constrained to verified callable positions and WP hooks.               | `d136e96`            |
+| **V3-09** | Persistence preservation              | Ordinary serialized class identity and private storage keys preserved alongside **CLASS** and reflection semantics.        | `d136e96`            |
+| **V3-10** | Standalone closure boundary           | Target/provider descriptor validation; fails closed on missing, empty, or ambiguous provider directories.                  | `95350ee`            |
+| **V3-11** | Exact source path include mapping     | Exact source paths resolved relative to originating file; eliminates basename ambiguity and missing-path misdirection.     | `95350ee`            |
+| **V3-12** | Composer model & bootstrap            | Strict declare(strict_types=1) insertion; preserved declared classmap outside src/ and original autoload ordering.         | `82268f6`            |
+| **V3-13** | Asset namespacing & minification      | Module assets namespaced into module folders; pre-existing .min.js assets preserved unless explicit overwrite enabled.     | `d381528`            |
+| **V3-14** | BuildPlan schema & validation         | Strict option validation; unknown/contradictory options fail before staging; preservation sensitivity verified.            | `616de87`            |
+| **V3-15** | Cache identity & composite hash       | Bumped cache schema to v3; bound planFingerprint, packages/, vendor/, tools, and capability profile into composite key.    | `240bf51`, `c52fe15` |
+| **V3-16** | Target PHP runtime gate               | Real target PHP interpreter validation before staging; target syntax gate rejects PHP 8.0-8.2 syntax on target 7.4.        | `6d1e0cf`            |
+| **V3-17** | Immutable final artifact verification | Pre-publish manifest verification; callback validation on registration; immutable ZIP byte hashing pre-publication.        | `da34d0b`            |
+| **V3-18** | Release delegation & skipZip          | Preflight option validation; universal consumer delegation to assembler; directory-only skipZip parity across pipeline.    | `616de87`, `28c4103` |
+| **V3-19** | Test harness diagnostics              | Harness captures exact stdout, stderr, and exit codes; supports multi-mode execution and external runners.                 | `d136e96`            |
+
+### Architectural Decisions (C1 – C4) Record
+
+- **C1 (Short-name flatten collisions):** Locked to fail-closed policy via `assertSymbolMapHasNoCollisions` with typed declaration records distinguishing global declarations from convenience aliases.
+- **C2 (Legacy flags):** Legacy presets (`clean`, `s`) segregated from the independent 3-flag capability model (`inlineFramework`, `spaghetti`, `obfuscate`) in `build-plan.mjs`.
+- **C3 (Closure boundary):** Explicit provider requirement enforced (`EXPLICIT_PROVIDER_REQUIRED`); empty or missing providers fail closed without header mutation.
+- **C4 (Extended spaghetti):** Inheritance/ancestor flattening remains deferred; minimum spaghetti (namespace flattening + ModuleLoader duck-typing) is fully implemented and tested.
+
+### Verification & Test Suite Status
+
+- **Full Tier Test Suite (`--tier=full`):** 79 test files, 588 subtests passed, 0 failed (100% green).
+- **Fast Tier Test Suite (`--tier=fast`):** 76 test files, 512 subtests passed, 0 failed (100% green).
+- **Standalone Build Unit Suite (`npm test`):** 588 subtests passed, 0 failed.
+- **Starter Kit Release & Scaffolding Jest Suites:** 3 test suites, 49 tests passed, 0 failed.
+- **Source-tree immutability:** Verified clean across staging cycles; zero residual build artifacts in source roots.
