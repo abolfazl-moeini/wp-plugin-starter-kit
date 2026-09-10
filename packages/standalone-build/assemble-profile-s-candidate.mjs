@@ -407,6 +407,7 @@ export async function assembleProfileSCandidate(options = {}) {
       console.log("==> 5b. Minifying first-party JS and CSS assets...");
       const minResult = await minifyAssetsInTree(stagingPlugin, contentRoot, {
         packageRoot: starterKitRoot,
+        overwriteExistingMin: Boolean(buildPlan.assetPolicy.overwriteExistingMin),
       });
       console.log(
         `==> Minified ${minResult.minifiedAssets} first-party JS/CSS assets in staging (${minResult.minSiblingsWritten || 0} .min siblings)!`,

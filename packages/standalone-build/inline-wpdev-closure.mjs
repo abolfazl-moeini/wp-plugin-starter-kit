@@ -1118,12 +1118,31 @@ if (!function_exists('wpdev_boot_closure_lifecycle')) {
   const assetsDir = path.join(targetDir, "assets");
   await mkdir(assetsDir, { recursive: true });
 
-  for (const relDir of REQUIRED_WPDEV_ASSET_DIRS) {
+  const assetDirsToProcess = new Set(REQUIRED_WPDEV_ASSET_DIRS);
+  if (fs.existsSync(modulesRoot)) {
+    const modEntries = await readdir(modulesRoot, { withFileTypes: true });
+    for (const me of modEntries) {
+      if (me.isDirectory()) {
+        const candidateAssetDir = `modules/${me.name}/assets`;
+        if (fs.existsSync(path.join(wpdevPluginDir, candidateAssetDir))) {
+          assetDirsToProcess.add(candidateAssetDir);
+        }
+      }
+    }
+  }
+
+  for (const relDir of assetDirsToProcess) {
     const srcDir = path.join(wpdevPluginDir, relDir);
-    await copyDirRecursive(srcDir, assetsDir, srcDir);
+    if (!fs.existsSync(srcDir)) continue;
+
+    // Root framework assets and modules/core/assets populate src/FrameworkClosure/assets/
+    if (relDir === "assets" || relDir === "modules/core/assets") {
+      await copyDirRecursive(srcDir, assetsDir, srcDir);
+    }
+
     // Keep module-local copies so wpdev_get_module_asset_url can
-    // is_readable() + fall back from .min.js to .js.
-    if (relDir.startsWith("modules/") && relDir.endsWith("/assets")) {
+    // is_readable() + fall back from .min.js to .js without cross-module collisions.
+    if (relDir.startsWith("modules/")) {
       await copyDirRecursive(srcDir, path.join(targetDir, relDir), srcDir);
     }
   }
@@ -1415,7 +1434,12 @@ export async function minifyAssetsInTree(dir, contentRoot = "", options = {}) {
           if (name.includes(".min.")) {
             await writeFile(file, res.code, "utf8");
           } else {
-            await writeFile(minifiedSiblingPath(file), res.code, "utf8");
+            const sibling = minifiedSiblingPath(file);
+            if (fs.existsSync(sibling) && !options.overwriteExistingMin) {
+              // Preserve pre-existing minified asset
+              return;
+            }
+            await writeFile(sibling, res.code, "utf8");
           }
           minifiedCount++;
         } catch (err) {
@@ -1429,6 +1453,10 @@ export async function minifyAssetsInTree(dir, contentRoot = "", options = {}) {
         try {
           const name = path.basename(file).toLowerCase();
           const outfile = name.includes(".min.") ? file : minifiedSiblingPath(file);
+          if (outfile !== file && fs.existsSync(outfile) && !options.overwriteExistingMin) {
+            // Preserve pre-existing minified asset
+            return;
+          }
           await execFileAsync(localEsbuildBin, [
             file,
             "--minify",

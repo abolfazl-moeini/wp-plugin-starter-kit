@@ -114,6 +114,7 @@ export function computePlanFingerprint(planData) {
       minifyAssets: Boolean(planData.assetPolicy?.minifyAssets),
       mirrorUnminified: Boolean(planData.assetPolicy?.mirrorUnminified),
       preserveReadable: Boolean(planData.assetPolicy?.preserveReadable),
+      overwriteExistingMin: Boolean(planData.assetPolicy?.overwriteExistingMin),
     },
     preservationPolicy: {
       frozenClasses: [...(planData.preservationPolicy?.frozenClasses || [])].sort(),
@@ -176,6 +177,7 @@ const ALLOWED_BUILD_PLAN_OPTIONS = new Set([
   "minifyAssets",
   "mirrorUnminified",
   "preserveReadable",
+  "overwriteExistingMin",
   "skipZip",
   "stripComments",
   "frozenClasses",
@@ -203,6 +205,7 @@ const BOOLEAN_OPTION_KEYS = new Set([
   "minifyAssets",
   "mirrorUnminified",
   "preserveReadable",
+  "overwriteExistingMin",
   "skipZip",
   "stripComments",
   "enforceTargetPhp",
@@ -323,16 +326,22 @@ export function createBuildPlan(rawOptions = {}) {
 
   // Asset policy
   // Clean, inline-only, and spaghetti-only preserve readable originals by default
-  const defaultMinifyAssets = obfuscate ? LEGACY_PRESETS.s.minifyAssets : false;
+  const isLegacyProfileS =
+    !hasIndependentCapability &&
+    (legacyProfile === "s" ||
+      (Boolean(rawOptions.obfuscate ?? legacyIsObfuscate) && rawOptions.profile === undefined));
+  const defaultMinifyAssets = isLegacyProfileS ? LEGACY_PRESETS.s.minifyAssets : false;
   const minifyAssets = Boolean(rawOptions.minifyAssets ?? defaultMinifyAssets);
   const mirrorUnminified = Boolean(rawOptions.mirrorUnminified ?? true);
   const preserveReadable = Boolean(rawOptions.preserveReadable ?? !minifyAssets);
+  const overwriteExistingMin = Boolean(rawOptions.overwriteExistingMin);
   const skipZip = Boolean(rawOptions.skipZip);
 
   const assetPolicy = Object.freeze({
     minifyAssets,
     mirrorUnminified,
     preserveReadable,
+    overwriteExistingMin,
   });
 
   // Preservation policy

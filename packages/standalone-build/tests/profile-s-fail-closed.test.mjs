@@ -695,3 +695,25 @@ test("computePlanFingerprint is sensitive to all preservation policy fields (V3-
   assert.notEqual(plan3.artifactIdentity.fingerprint, plan4.artifactIdentity.fingerprint);
 });
 
+test("V3-13: BuildPlan separates legacy Profile S asset minification from independent obfuscation", () => {
+  // Independent obfuscate-only build defaults minifyAssets to false
+  const obfOnly = createBuildPlan({
+    consumer: "test-plugin",
+    obfuscate: true,
+    inlineFramework: false,
+    spaghetti: false,
+  });
+  assert.equal(obfOnly.assetPolicy.minifyAssets, false);
+
+  // Legacy Profile S preset defaults minifyAssets to true
+  const sPlan = createBuildPlan({ consumer: "test-plugin", profile: "s" });
+  assert.equal(sPlan.assetPolicy.minifyAssets, true);
+
+  // Explicit overwriteExistingMin defaults to false and binds to fingerprint
+  const defaultMin = createBuildPlan({ consumer: "test-plugin" });
+  assert.equal(defaultMin.assetPolicy.overwriteExistingMin, false);
+  const overwriteMin = createBuildPlan({ consumer: "test-plugin", overwriteExistingMin: true });
+  assert.equal(overwriteMin.assetPolicy.overwriteExistingMin, true);
+  assert.notEqual(defaultMin.artifactIdentity.fingerprint, overwriteMin.artifactIdentity.fingerprint);
+});
+

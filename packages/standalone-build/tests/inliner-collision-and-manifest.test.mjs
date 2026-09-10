@@ -143,3 +143,89 @@ test("Minifier: fails closed and reports errors when JS/CSS has invalid syntax",
     await rm(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("V3-13: minifyAssetsInTree preserves pre-existing minified assets unless overwrite is selected", async () => {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "minifier-preserve-existing-"));
+  const jsDir = path.join(tmpDir, "assets/js");
+  await mkdir(jsDir, { recursive: true });
+
+  const customMinContent = "/* custom handcrafted minified asset */ var x=42;";
+  await writeFile(path.join(jsDir, "demo.js"), "const demo = 100 + 200; console.log(demo);");
+  await writeFile(path.join(jsDir, "demo.min.js"), customMinContent);
+
+  const contentRoot = path.resolve(fileURLToPath(new URL("../../../..", import.meta.url)));
+  try {
+    // 1. By default, existing .min.js must be preserved
+    await minifyAssetsInTree(tmpDir, contentRoot, { overwriteExistingMin: false });
+    const preservedContent = await readFile(path.join(jsDir, "demo.min.js"), "utf8");
+    assert.equal(preservedContent, customMinContent, "Pre-existing .min.js must not be overwritten by default");
+
+    // 2. With overwriteExistingMin: true, the file should be updated
+    await minifyAssetsInTree(tmpDir, contentRoot, { overwriteExistingMin: true });
+    const overwrittenContent = await readFile(path.join(jsDir, "demo.min.js"), "utf8");
+    assert.notEqual(overwrittenContent, customMinContent, "Existing .min.js should be updated when overwrite is requested");
+    assert.ok(overwrittenContent.includes("console.log"), "Should contain minified version of demo.js");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("V3-13: Module assets with identical relative paths do not collide during inlining", async () => {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "asset-collision-test-"));
+  try {
+    const fakeFramework = path.join(tmpDir, "fake-wpdev");
+    await mkdir(path.join(fakeFramework, "modules/admin-page-builder/assets/js"), { recursive: true });
+    await mkdir(path.join(fakeFramework, "modules/wizard/assets/js"), { recursive: true });
+    await mkdir(path.join(fakeFramework, "modules/core/src"), { recursive: true });
+
+    // Dummy core file so framework is valid
+    await writeFile(
+      path.join(fakeFramework, "modules/core/src/class-plugin.php"),
+      `<?php namespace WPDevFramework\\Core; class Plugin {}\n`
+    );
+
+    // Two distinct modules with different contents at the SAME relative asset path: js/main.js
+    const adminContent = "/* admin */ console.log('admin_builder');";
+    const wizardContent = "/* wizard */ console.log('wizard_builder');";
+    await writeFile(path.join(fakeFramework, "modules/admin-page-builder/assets/js/main.js"), adminContent);
+    await writeFile(path.join(fakeFramework, "modules/wizard/assets/js/main.js"), wizardContent);
+
+    const stagingPlugin = path.join(tmpDir, "test-consumer");
+    await mkdir(stagingPlugin, { recursive: true });
+    await writeFile(
+      path.join(stagingPlugin, "test-consumer.php"),
+      `<?php\n/**\n * Plugin Name: Test Consumer\n * Requires Plugins: wpdev\n */\n`
+    );
+
+    // Inlining must succeed without throwing CRITICAL STRUCTURAL COLLISION
+    const result = await inlineWpdevClosure({
+      stagingPlugin,
+      consumer: "test-consumer",
+      contentRoot: tmpDir,
+      wpdevPluginDirOverride: fakeFramework,
+    });
+    assert.ok(result.inlinedFiles > 0);
+
+    // Both files must exist preserved in their respective module-local asset directories
+    const adminCopied = await readFile(
+      path.join(stagingPlugin, "src/FrameworkClosure/modules/admin-page-builder/assets/js/main.js"),
+      "utf8"
+    );
+    const wizardCopied = await readFile(
+      path.join(stagingPlugin, "src/FrameworkClosure/modules/wizard/assets/js/main.js"),
+      "utf8"
+    );
+    assert.equal(adminCopied, adminContent);
+    assert.equal(wizardCopied, wizardContent);
+
+    // The shared root assets/js/main.js should NOT have been created by flattening
+    assert.equal(
+      fs.existsSync(path.join(stagingPlugin, "src/FrameworkClosure/assets/js/main.js")),
+      false,
+      "Root assets/js/main.js must not be created from module-specific assets"
+    );
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
