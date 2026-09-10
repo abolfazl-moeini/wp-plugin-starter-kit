@@ -51,7 +51,7 @@ import {
   validatePhpSyntaxTree,
 } from "./profile-s-fail-closed.mjs";
 import { resolveContentRoot } from "./resolve-content-root.mjs";
-import { createBuildPlan, resolveArtifactZipName } from "./build-plan.mjs";
+import { createBuildPlan, resolveArtifactZipName, validateBuildPlan } from "./build-plan.mjs";
 
 const execFileAsync = promisify(execFile);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -147,7 +147,7 @@ export async function assembleProfileSCandidate(options = {}) {
         pluginsDirArg: options.pluginsDir || options.pluginsDirArg || null,
         isObfuscate: options.isObfuscate,
         obfuscate: options.obfuscate,
-        profile: options.profile || ((options.isObfuscate ?? options.obfuscate) ? "s" : "clean"),
+        profile: options.profile,
         inlineFramework: options.inlineFramework,
         spaghetti: options.spaghetti,
         minifyAssets: options.minifyAssets,
@@ -166,6 +166,11 @@ export async function assembleProfileSCandidate(options = {}) {
     pluginsDirArg,
     emitDistDir = true,
   } = parsed;
+
+  if (options.buildPlan) {
+    validateBuildPlan(options.buildPlan);
+  }
+
   const buildPlan = options.buildPlan || createBuildPlan({
     consumer,
     profile: parsed.profile,
@@ -180,15 +185,23 @@ export async function assembleProfileSCandidate(options = {}) {
     contentRoot,
     pluginsDir: pluginsDirArg,
     frameworkProvider: options.frameworkProvider || parsed.frameworkProvider,
+    frozenClasses: options.frozenClasses,
+    frozenFunctions: options.frozenFunctions,
+    frozenConstants: options.frozenConstants,
+    frozenProperties: options.frozenProperties,
+    frozenMethods: options.frozenMethods,
+    frozenVars: options.frozenVars,
+    gettextDomains: options.gettextDomains,
+    reflectionCallbacks: options.reflectionCallbacks,
   });
   const isObfuscate = buildPlan.capabilities.obfuscate;
   const profile = buildPlan.capabilities.inlineFramework
     && buildPlan.capabilities.spaghetti
     && buildPlan.capabilities.obfuscate
     ? "s"
-    : (buildPlan.artifactIdentity.capabilityTag === "standalone" || buildPlan.artifactIdentity.capabilityTag === "clean"
+    : (buildPlan.capabilities.inlineFramework && !buildPlan.capabilities.spaghetti && !buildPlan.capabilities.obfuscate
       ? "clean"
-      : buildPlan.artifactIdentity.capabilityTag);
+      : (buildPlan.artifactIdentity?.capabilityTag || "custom"));
   const skipZip = Boolean(buildPlan.skipZip || parsed.skipZip || options.skipZip);
   const signal = options.signal;
   const exec = (file, args, extra = {}) => execFileAsync(file, args, signal ? { ...extra, signal } : extra);
@@ -638,6 +651,9 @@ export async function assembleProfileSCandidate(options = {}) {
       await fs.promises.rename(tempPublishZip, outputZip);
       console.log(`==> Published verified candidate to: ${outputZip}`);
     } else {
+      if (fs.existsSync(outputZip)) {
+        await rm(outputZip, { force: true });
+      }
       console.log("==> skipZip: verified candidate ZIP was not published");
     }
 

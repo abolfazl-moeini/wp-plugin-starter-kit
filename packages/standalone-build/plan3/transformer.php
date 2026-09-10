@@ -1155,13 +1155,13 @@ class Plan3_Transformer {
 						$hash_key   = ! empty( $current_namespace ) ? ( $current_namespace . '\\' . $class_name ) : $class_name;
 						$this->class_kinds[ $hash_key ] = $kind;
 						$is_frozen = in_array( $class_name, self::$frozen_public_classes, true );
-						$this->symbol_paths[ $hash_key ] = $path . ':' . $class_line;
+						$this->symbol_paths[ $hash_key ] = $file_path . ':' . $class_line;
 						$this->declarations[] = array(
 							'symbol'               => $hash_key,
 							'name'                 => $class_name,
 							'namespace'            => $current_namespace,
 							'kind'                 => $kind,
-							'file'                 => $path,
+							'file'                 => $file_path,
 							'line'                 => $class_line,
 							'is_global'            => empty( $current_namespace ),
 							'is_alias'             => false,

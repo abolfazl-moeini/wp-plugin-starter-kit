@@ -658,3 +658,40 @@ test("assertSymbolMapHasNoCollisions rejects real global declaration vs namespac
   // With alias status marked, alias does not collide with declaration
   assert.equal(assertSymbolMapHasNoCollisions(aliasMap, { checkFlattenCollisions: true }), 3);
 });
+
+test("createBuildPlan rejects unknown options and non-boolean flags (V3-14)", () => {
+  assert.throws(
+    () => createBuildPlan({ consumer: "demo", invalidOptionName: 123 }),
+    /Unknown BuildPlan option 'invalidOptionName'/,
+  );
+  assert.throws(
+    () => createBuildPlan({ consumer: "demo", inlineFramework: "true" }),
+    /BuildPlan option 'inlineFramework' must be a boolean/,
+  );
+});
+
+test("validateBuildPlan rejects forged or mismatched fingerprints (V3-14)", () => {
+  const plan = createBuildPlan({ consumer: "demo" });
+  const forged = {
+    ...plan,
+    artifactIdentity: {
+      ...plan.artifactIdentity,
+      fingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    },
+  };
+  assert.throws(
+    () => validateBuildPlan(forged),
+    /BuildPlan fingerprint mismatch/,
+  );
+});
+
+test("computePlanFingerprint is sensitive to all preservation policy fields (V3-14, V3-15)", () => {
+  const plan1 = createBuildPlan({ consumer: "demo", frozenMethods: ["foo"] });
+  const plan2 = createBuildPlan({ consumer: "demo", frozenMethods: ["bar"] });
+  assert.notEqual(plan1.artifactIdentity.fingerprint, plan2.artifactIdentity.fingerprint);
+
+  const plan3 = createBuildPlan({ consumer: "demo", frozenVars: ["$v1"] });
+  const plan4 = createBuildPlan({ consumer: "demo", frozenVars: ["$v2"] });
+  assert.notEqual(plan3.artifactIdentity.fingerprint, plan4.artifactIdentity.fingerprint);
+});
+

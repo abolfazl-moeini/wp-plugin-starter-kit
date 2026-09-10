@@ -104,23 +104,29 @@ export function computePlanFingerprint(planData) {
     schemaVersion: BUILD_PLAN_SCHEMA_VERSION,
     consumer: planData.consumer,
     capabilities: {
-      inlineFramework: Boolean(planData.capabilities.inlineFramework),
-      spaghetti: Boolean(planData.capabilities.spaghetti),
-      obfuscate: Boolean(planData.capabilities.obfuscate),
+      inlineFramework: Boolean(planData.capabilities?.inlineFramework),
+      spaghetti: Boolean(planData.capabilities?.spaghetti),
+      obfuscate: Boolean(planData.capabilities?.obfuscate),
     },
     targetPhp: planData.targetPhp,
     skipZip: Boolean(planData.skipZip),
     assetPolicy: {
-      minifyAssets: Boolean(planData.assetPolicy.minifyAssets),
-      mirrorUnminified: Boolean(planData.assetPolicy.mirrorUnminified),
-      preserveReadable: Boolean(planData.assetPolicy.preserveReadable),
+      minifyAssets: Boolean(planData.assetPolicy?.minifyAssets),
+      mirrorUnminified: Boolean(planData.assetPolicy?.mirrorUnminified),
+      preserveReadable: Boolean(planData.assetPolicy?.preserveReadable),
     },
     preservationPolicy: {
-      frozenClasses: [...(planData.preservationPolicy.frozenClasses || [])].sort(),
-      frozenFunctions: [...(planData.preservationPolicy.frozenFunctions || [])].sort(),
-      frozenConstants: [...(planData.preservationPolicy.frozenConstants || [])].sort(),
+      frozenClasses: [...(planData.preservationPolicy?.frozenClasses || [])].sort(),
+      frozenFunctions: [...(planData.preservationPolicy?.frozenFunctions || [])].sort(),
+      frozenConstants: [...(planData.preservationPolicy?.frozenConstants || [])].sort(),
+      frozenProperties: [...(planData.preservationPolicy?.frozenProperties || [])].sort(),
+      frozenMethods: [...(planData.preservationPolicy?.frozenMethods || [])].sort(),
+      frozenVars: [...(planData.preservationPolicy?.frozenVars || [])].sort(),
+      gettextDomains: [...(planData.preservationPolicy?.gettextDomains || [])].sort(),
+      reflectionCallbacks: [...(planData.preservationPolicy?.reflectionCallbacks || [])].sort(),
     },
     source: {
+      consumer: planData.consumer,
       frameworkProvider: planData.source?.frameworkProvider || null,
     },
   };
@@ -151,6 +157,54 @@ export function resolveArtifactZipName(plan) {
   return `${consumer}-${tag}.zip`;
 }
 
+const ALLOWED_BUILD_PLAN_OPTIONS = new Set([
+  "consumer",
+  "profile",
+  "targetPhp",
+  "phpTarget",
+  "inlineFramework",
+  "spaghetti",
+  "obfuscate",
+  "isObfuscate",
+  "sourceRoot",
+  "contentRoot",
+  "pluginsDir",
+  "pluginsDirArg",
+  "frameworkProvider",
+  "minifyAssets",
+  "mirrorUnminified",
+  "preserveReadable",
+  "skipZip",
+  "stripComments",
+  "frozenClasses",
+  "frozenFunctions",
+  "frozenConstants",
+  "frozenProperties",
+  "frozenMethods",
+  "frozenVars",
+  "gettextDomains",
+  "reflectionCallbacks",
+  "signal",
+  "phpBin",
+  "enforceTargetPhp",
+  "emitDistDir",
+  "argv",
+]);
+
+const BOOLEAN_OPTION_KEYS = new Set([
+  "inlineFramework",
+  "spaghetti",
+  "obfuscate",
+  "isObfuscate",
+  "minifyAssets",
+  "mirrorUnminified",
+  "preserveReadable",
+  "skipZip",
+  "stripComments",
+  "enforceTargetPhp",
+  "emitDistDir",
+]);
+
 /**
  * Creates and validates a versioned BuildPlan.
  *
@@ -162,9 +216,27 @@ export function createBuildPlan(rawOptions = {}) {
     throw new Error("BuildPlan options must be a non-null object");
   }
 
+  for (const key of Object.keys(rawOptions)) {
+    if (!ALLOWED_BUILD_PLAN_OPTIONS.has(key)) {
+      throw new Error(`Unknown BuildPlan option '${key}'`);
+    }
+    if (BOOLEAN_OPTION_KEYS.has(key) && rawOptions[key] !== undefined && rawOptions[key] !== null) {
+      if (typeof rawOptions[key] !== "boolean") {
+        throw new Error(`BuildPlan option '${key}' must be a boolean, got ${typeof rawOptions[key]}`);
+      }
+    }
+  }
+
   const consumer = String(rawOptions.consumer || "").trim();
   if (!consumer) {
     throw new Error("BuildPlan prerequisite missing: 'consumer' slug is required");
+  }
+
+  const rawProfile = rawOptions.profile !== undefined && rawOptions.profile !== null
+    ? String(rawOptions.profile).trim().toLowerCase()
+    : null;
+  if (rawProfile !== null && rawProfile !== "clean" && rawProfile !== "s" && rawProfile !== "custom") {
+    throw new Error(`Invalid profile '${rawOptions.profile}'. Allowed: clean, s, custom`);
   }
 
   // Resolve target PHP
@@ -342,6 +414,12 @@ export function validateBuildPlan(plan) {
   }
   if (!plan.artifactIdentity?.fingerprint) {
     throw new Error("BuildPlan requires artifactIdentity with fingerprint");
+  }
+  const expectedFingerprint = computePlanFingerprint(plan);
+  if (plan.artifactIdentity.fingerprint !== expectedFingerprint) {
+    throw new Error(
+      `BuildPlan fingerprint mismatch: expected '${expectedFingerprint}', got '${plan.artifactIdentity.fingerprint}'`
+    );
   }
   return true;
 }

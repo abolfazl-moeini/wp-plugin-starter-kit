@@ -1390,6 +1390,35 @@ export async function runPipelineOrchestration(options = {}) {
           });
         }
 
+        if (pluginBuildPlan.skipZip && fs.existsSync(targetZipPath)) {
+          await fs.promises.rm(targetZipPath, { force: true });
+        }
+
+        if (pluginBuildPlan.skipZip) {
+          const distDir = path.join(customDistDir, plugin);
+          const manifestPath = path.join(distDir, "release-manifest.json");
+          const altManifest = path.join(distDir, "artifact-manifest.json");
+          const manifestFile = fs.existsSync(manifestPath) ? manifestPath : altManifest;
+          let manifestDigest = null;
+          let artifactId = `${plugin}-custom`;
+          if (fs.existsSync(manifestFile)) {
+            const m = JSON.parse(await fs.promises.readFile(manifestFile, "utf8"));
+            manifestDigest = m.manifestDigest;
+            artifactId = m.artifactId || artifactId;
+          }
+          const pElapsed = ((Date.now() - pStart) / 1000).toFixed(2);
+          console.log(`  ✓ [${plugin}] Built directory artifact in ${pElapsed}s (skipZip=true).`);
+          return {
+            status: "rebuilt",
+            plugin,
+            artifactId,
+            composite: pluginPlan.compositeFingerprint,
+            distRoot: distDir,
+            manifestDigest,
+            skipZip: true,
+          };
+        }
+
         if (!fs.existsSync(targetZipPath)) {
           throw new Error(`Build finished but expected target ZIP does not exist: ${targetZipPath}`);
         }

@@ -526,9 +526,9 @@ export async function prepareRelease(options = {}) {
   const isRegisteredConsumer = CANONICAL_CONSUMERS.has(slug);
 
   if (
-    isRegisteredConsumer &&
     canonicalAssemblerPath &&
-    options.useCanonicalAssembler !== false
+    options.useCanonicalAssembler !== false &&
+    (isRegisteredConsumer || options.useCanonicalAssembler === true)
   ) {
     const { assembleProfileSCandidate } = await import(
       pathToFileURL(canonicalAssemblerPath).href
@@ -542,10 +542,23 @@ export async function prepareRelease(options = {}) {
       sourceRoot: root,
       consumer: slug,
       outputDir: outAbs,
-      isObfuscate,
-      profile: isObfuscate ? "s" : "clean",
-      emitDistDir: true,
+      isObfuscate:
+        options.isObfuscate ?? (options.obfuscate || options.profile === "s"),
+      obfuscate: options.obfuscate,
+      profile: options.profile,
+      inlineFramework: options.inlineFramework,
+      spaghetti: options.spaghetti,
+      minifyAssets: options.minifyAssets,
       skipZip,
+      targetPhp:
+        options.targetPhp || options.phpTarget || phpMinVersion || "7.4",
+      phpBin: options.phpBin,
+      enforceTargetPhp: options.enforceTargetPhp,
+      emitDistDir: true,
+      frozenClasses: options.frozenClasses,
+      frozenFunctions: options.frozenFunctions,
+      frozenConstants: options.frozenConstants,
+      frameworkProvider: options.frameworkProvider,
     });
 
     const distRoot = path.join(outAbs, slug);
@@ -562,6 +575,10 @@ export async function prepareRelease(options = {}) {
   }
 
   // Generic release workflow for non-registered plugins
+  if (isObfuscate && skipRector) {
+    throw new Error("Profile S cannot combine --obfuscate with --skip-rector");
+  }
+
   const distRoot = path.join(outAbs, slug);
 
   if (existsSync(distRoot)) {
@@ -570,10 +587,6 @@ export async function prepareRelease(options = {}) {
   mkdirSync(outAbs, { recursive: true });
 
   copyTree(root, distRoot, releaseCopyExcludeNames());
-
-  if (isObfuscate && skipRector) {
-    throw new Error("Profile S cannot combine --obfuscate with --skip-rector");
-  }
 
   // Downgrade *before* composer --no-dev and before stripping `dev/`.
   if (!skipRector) {
