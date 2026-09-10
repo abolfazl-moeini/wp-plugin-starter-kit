@@ -82,6 +82,11 @@ function uint16(buffer, offset) {
   return buffer.readUInt16LE(offset);
 }
 
+export const MAX_ENTRY_UNCOMPRESSED_BYTES = 100 * 1024 * 1024; // 100 MB max for a single file entry
+export const MAX_TOTAL_UNCOMPRESSED_BYTES = 500 * 1024 * 1024; // 500 MB max total uncompressed
+export const MAX_MANIFEST_UNCOMPRESSED_BYTES = 10 * 1024 * 1024; // 10 MB max for artifact manifest
+export const MAX_COMPRESSED_INPUT_BYTES = 500 * 1024 * 1024; // 500 MB max compressed archive
+
 const SKIP_ZIP_RELATIVE_NAMES = new Set([
   "artifact-manifest.json",
   "release-manifest.json",
@@ -101,6 +106,11 @@ function hashZipPayload(bytes, {
   if (isDirectory) {
     return null;
   }
+  if (uncompressedSize > MAX_ENTRY_UNCOMPRESSED_BYTES) {
+    throw new Error(
+      `candidate ZIP payload exceeds bounded entry limit (${uncompressedSize} > ${MAX_ENTRY_UNCOMPRESSED_BYTES}): ${name}`
+    );
+  }
   const dataOffset = localHeaderOffset + 30 + localNameLength + localExtraLength;
   if (dataOffset + compressedSize > bytes.length) {
     throw new Error(`candidate ZIP payload is truncated: ${name}`);
@@ -111,7 +121,9 @@ function hashZipPayload(bytes, {
     payload = compressed;
   } else if (compressionMethod === 8) {
     try {
-      payload = zlib.inflateRawSync(compressed);
+      payload = zlib.inflateRawSync(compressed, {
+        maxOutputLength: Math.min(uncompressedSize + 1, MAX_ENTRY_UNCOMPRESSED_BYTES),
+      });
     } catch (err) {
       throw new Error(`candidate ZIP payload inflate failed: ${name}: ${err.message}`);
     }
@@ -138,6 +150,9 @@ function zipEntryRelativePath(entryName, consumer) {
 }
 
 export function readZipEntries(bytes) {
+  if (bytes.length > MAX_COMPRESSED_INPUT_BYTES) {
+    throw new Error(`candidate ZIP compressed size exceeds limit (${bytes.length} > ${MAX_COMPRESSED_INPUT_BYTES})`);
+  }
   const earliest = Math.max(0, bytes.length - 0x10016);
   let eocd = -1;
   for (let offset = bytes.length - 22; offset >= earliest; offset -= 1) {
@@ -163,7 +178,6 @@ export function readZipEntries(bytes) {
   const caseFolded = new Set();
   let offset = centralOffset;
   let totalUncompressedSize = 0;
-  const MAX_TOTAL_UNCOMPRESSED = 500 * 1024 * 1024; // 500 MB max
 
   for (let index = 0; index < entriesCount; index += 1) {
     if (offset + 46 > bytes.length || uint32(bytes, offset) !== 0x02014b50) {
@@ -185,6 +199,9 @@ export function readZipEntries(bytes) {
     if (!Buffer.from(name, "utf8").equals(rawName) || !isSafeRelative(name.replace(/\/$/, ""))) {
       throw new Error(`candidate ZIP has an unsafe entry path: ${name}`);
     }
+    if (name.includes("\n") || name.includes("\r")) {
+      throw new Error(`candidate ZIP entry path contains newline characters: ${JSON.stringify(name)}`);
+    }
 
     if (seenNames.has(name) || caseFolded.has(name.toLowerCase())) {
       throw new Error(`candidate ZIP contains duplicate or case-colliding entry: ${name}`);
@@ -192,9 +209,13 @@ export function readZipEntries(bytes) {
     seenNames.add(name);
     caseFolded.add(name.toLowerCase());
 
+    if (uncompressedSize > MAX_ENTRY_UNCOMPRESSED_BYTES) {
+      throw new Error(`candidate ZIP entry exceeds bounded entry limit (${uncompressedSize} > ${MAX_ENTRY_UNCOMPRESSED_BYTES}): ${name}`);
+    }
+
     totalUncompressedSize += uncompressedSize;
-    if (totalUncompressedSize > MAX_TOTAL_UNCOMPRESSED) {
-      throw new Error("candidate ZIP exceeds maximum uncompressed size limit");
+    if (totalUncompressedSize > MAX_TOTAL_UNCOMPRESSED_BYTES) {
+      throw new Error(`candidate ZIP exceeds maximum uncompressed size limit (${totalUncompressedSize} > ${MAX_TOTAL_UNCOMPRESSED_BYTES})`);
     }
 
     const unixMode = (externalAttributes >>> 16) & 0xffff;
@@ -928,6 +949,9 @@ export function readEmbeddedManifestFromZip(zipBytes, consumer) {
   if (!Buffer.isBuffer(zipBytes)) {
     throw new Error("zipBytes must be a Buffer");
   }
+  if (zipBytes.length > MAX_COMPRESSED_INPUT_BYTES) {
+    return { valid: false, reason: `Candidate ZIP compressed size exceeds limit (${zipBytes.length} > ${MAX_COMPRESSED_INPUT_BYTES})` };
+  }
   try {
     readZipEntries(zipBytes);
   } catch (err) {
@@ -977,6 +1001,9 @@ export function readEmbeddedManifestFromZip(zipBytes, consumer) {
   }
 
   const { compMethod, compSize, uncompSize, localOffset } = manifestEntry;
+  if (uncompSize > MAX_MANIFEST_UNCOMPRESSED_BYTES) {
+    return { valid: false, reason: `Embedded manifest uncompressed size exceeds limit (${uncompSize} > ${MAX_MANIFEST_UNCOMPRESSED_BYTES})` };
+  }
   if (compMethod !== 0 && compMethod !== 8) {
     return { valid: false, reason: `Unsupported ZIP compression method for embedded manifest: ${compMethod}` };
   }
@@ -993,7 +1020,9 @@ export function readEmbeddedManifestFromZip(zipBytes, consumer) {
   const compData = zipBytes.subarray(dataOffset, dataOffset + compSize);
   let uncompData;
   try {
-    uncompData = compMethod === 0 ? compData : zlib.inflateRawSync(compData);
+    uncompData = compMethod === 0 ? compData : zlib.inflateRawSync(compData, {
+      maxOutputLength: Math.min(uncompSize + 1, MAX_MANIFEST_UNCOMPRESSED_BYTES),
+    });
   } catch (err) {
     return { valid: false, reason: `Failed to decompress manifest: ${err.message}` };
   }
@@ -1027,6 +1056,201 @@ export function readEmbeddedManifestFromZip(zipBytes, consumer) {
   };
 }
 
+/**
+ * Collect plugin-relative paths Composer will `require` from autoload.files.
+ * Used both to order ZIP entries (complementary in-place-unzip defense) and
+ * to fail closed in atomic deploy preflight when a listed target is missing.
+ */
+export async function collectComposerAutoloadFileTargets(rootDir) {
+  const targets = new Set();
+  const root = path.resolve(rootDir);
+
+  const autoloadFilesPhp = path.join(root, "vendor/composer/autoload_files.php");
+  if (fs.existsSync(autoloadFilesPhp)) {
+    const content = await readFile(autoloadFilesPhp, "utf8");
+    let matchCount = 0;
+    for (const m of content.matchAll(/\$baseDir\s*\.\s*['"]\/([^'"]+)['"]/g)) {
+      targets.add(m[1].replace(/\\/g, "/"));
+      matchCount++;
+    }
+    for (const m of content.matchAll(/\$vendorDir\s*\.\s*['"]\/([^'"]+)['"]/g)) {
+      targets.add(`vendor/${m[1].replace(/\\/g, "/")}`);
+      matchCount++;
+    }
+    if (matchCount === 0 && (content.includes("=>") || content.includes("$baseDir") || content.includes("$vendorDir"))) {
+      throw new Error(`Unsupported Composer autoload_files.php format in ${autoloadFilesPhp}`);
+    }
+  }
+
+  const autoloadStaticPhp = path.join(root, "vendor/composer/autoload_static.php");
+  if (fs.existsSync(autoloadStaticPhp)) {
+    const content = await readFile(autoloadStaticPhp, "utf8");
+    // Support both long `array(...)` and short `[...]` static $files forms.
+    // Without the short-form branch a `[...]` block silently yields zero targets.
+    const filesBlockMatch = content.match(/public\s+static\s+\$files\s*=\s*array\s*\(([\s\S]*?)\);/) || content.match(/public\s+static\s+\$files\s*=\s*\[([\s\S]*?)\];/);
+    if (filesBlockMatch) {
+      const filesBlock = filesBlockMatch[1];
+      let matchCount = 0;
+      for (const m of filesBlock.matchAll(/__DIR__\s*\.\s*['"]\/\.\.\/\.\.['"]\s*\.\s*['"]\/([^'"]+)['"]/g)) {
+        targets.add(m[1].replace(/\\/g, "/"));
+        matchCount++;
+      }
+      for (const m of filesBlock.matchAll(/__DIR__\s*\.\s*['"]\/\.\.['"]\s*\.\s*['"]\/([^'"]+)['"]/g)) {
+        targets.add(`vendor/${m[1].replace(/\\/g, "/")}`);
+        matchCount++;
+      }
+      if (matchCount === 0 && filesBlock.trim().length > 0 && filesBlock.includes("=>")) {
+        throw new Error(`Unsupported Composer autoload_static.php files block format in ${autoloadStaticPhp}`);
+      }
+    }
+  }
+
+  const composerJsonPath = path.join(root, "composer.json");
+  if (fs.existsSync(composerJsonPath)) {
+    const cData = JSON.parse(await readFile(composerJsonPath, "utf8"));
+    if (Array.isArray(cData?.autoload?.files)) {
+      for (const f of cData.autoload.files) {
+        if (typeof f === "string" && f.trim()) {
+          targets.add(f.replace(/\\/g, "/").replace(/^\.\//, ""));
+        }
+      }
+    }
+  }
+
+  // Validate containment, traversal, and symlinks for all resolved targets
+  const validatedTargets = new Set();
+  const realRoot = (() => {
+    try {
+      return fs.realpathSync(root);
+    } catch {
+      return root;
+    }
+  })();
+  for (const t of targets) {
+    if (!t || typeof t !== "string") continue;
+    const normalized = path.posix.normalize(t);
+    if (normalized.startsWith("../") || normalized === ".." || path.isAbsolute(normalized)) {
+      throw new Error(`Composer autoload target '${t}' attempts parent directory traversal`);
+    }
+    const resolvedPath = path.resolve(root, normalized);
+    if (!resolvedPath.startsWith(root + path.sep)) {
+      throw new Error(`Composer autoload target '${t}' escapes root boundary: ${resolvedPath}`);
+    }
+    // Reject symlink escapes anywhere in the parent chain, not just the leaf.
+    // A lexical inside-check alone accepts `linkdir/evil.php` where `linkdir`
+    // points outside the root.
+    let cursor = resolvedPath;
+    while (cursor.startsWith(root + path.sep) && cursor !== root) {
+      let st = null;
+      try {
+        st = await fs.promises.lstat(cursor);
+      } catch {
+        cursor = path.dirname(cursor);
+        continue;
+      }
+      if (st.isSymbolicLink()) {
+        let linkTarget;
+        try {
+          linkTarget = await fs.promises.realpath(cursor);
+        } catch {
+          throw new Error(`Composer autoload target '${t}' traverses an unreadable symlink: ${cursor}`);
+        }
+        if (linkTarget !== realRoot && !linkTarget.startsWith(realRoot + path.sep)) {
+          throw new Error(`Composer autoload target '${t}' escapes root via symlink: ${cursor} -> ${linkTarget}`);
+        }
+        break;
+      }
+      const parent = path.dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+    }
+    if (fs.existsSync(resolvedPath)) {
+      const st = await fs.promises.lstat(resolvedPath);
+      if (st.isSymbolicLink()) {
+        throw new Error(`Composer autoload target '${t}' must not be a symbolic link: ${resolvedPath}`);
+      }
+    }
+    validatedTargets.add(normalized);
+  }
+
+  return validatedTargets;
+}
+
+/**
+ * Computes canonical entry priority for deterministic, race-free ZIP archive creation.
+ * Crucial constraint: Bootstrap, framework closures, and autoload target files MUST strictly
+ * precede Composer autoloader files (vendor/autoload.php & autoload_real.php) to prevent
+ * transient Fatal errors during in-place extractions.
+ */
+function getCanonicalEntryPriority(rel, rootName, autoloadTargets = new Set()) {
+  if (!rel) return 0; // Root directory
+  // Priority 10: Critical root descriptors & bootstrap
+  if (
+    rel === `${rootName}.php` ||
+    rel === "artifact-manifest.json" ||
+    rel === "LICENSE" ||
+    rel === "readme.txt" ||
+    rel === "project.config.json" ||
+    (!rel.includes("/") && rel.endsWith(".php"))
+  ) {
+    return 10;
+  }
+  // Priority 20: Framework Closures & Composer autoload.files targets
+  if (
+    rel === "src" ||
+    rel === "src/FrameworkClosure" ||
+    rel === "src/FrameworkClosure/functions-closure.php" ||
+    rel.startsWith("src/FrameworkClosure/") ||
+    autoloadTargets.has(rel) ||
+    (rel.startsWith("src/") && rel.endsWith("-register.php"))
+  ) {
+    return 20;
+  }
+  // Priority 30: Other plugin PHP files (classes, modules)
+  if (!rel.startsWith("vendor/") && !rel.startsWith("vendor-prefixed/") && rel.endsWith(".php")) {
+    return 30;
+  }
+  // Priority 40: Other plugin static assets, styles, languages, templates
+  if (!rel.startsWith("vendor/") && !rel.startsWith("vendor-prefixed/")) {
+    return 40;
+  }
+  // Priority 50: Vendor-prefixed and third-party vendor code
+  if (
+    rel.startsWith("vendor-prefixed/") ||
+    (rel.startsWith("vendor/") && !rel.startsWith("vendor/composer/") && rel !== "vendor/autoload.php")
+  ) {
+    return 50;
+  }
+  // Priority 60+: Composer autoloader files (MUST BE EXTRACTED LAST)
+  if (rel === "vendor/composer/ClassLoader.php") return 60;
+  if (rel.startsWith("vendor/composer/") && !rel.endsWith("autoload_real.php")) return 61;
+  if (rel === "vendor/composer/autoload_real.php") return 62;
+  if (rel === "vendor/autoload.php") return 70;
+  return 55;
+}
+
+const EXCLUDED_ZIP_DIR_NAMES = new Set([".git", "node_modules"]);
+const EXCLUDED_ZIP_FILE_NAMES = new Set([".DS_Store"]);
+
+async function collectCanonicalZipEntries(dir, relPrefix = "") {
+  const items = [];
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      if (EXCLUDED_ZIP_DIR_NAMES.has(entry.name)) continue;
+      const childRel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+      items.push({ rel: childRel, isDirectory: true });
+      const subItems = await collectCanonicalZipEntries(path.join(dir, entry.name), childRel);
+      items.push(...subItems);
+    } else if (entry.isFile()) {
+      if (EXCLUDED_ZIP_FILE_NAMES.has(entry.name) || entry.name.endsWith(".bak") || entry.name.endsWith(".swp")) continue;
+      const childRel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+      items.push({ rel: childRel, isDirectory: false });
+    }
+  }
+  return items;
+}
+
 export async function createCanonicalZip({ sourceRoot, outputZip, rootName }) {
   const root = path.resolve(sourceRoot);
   const archive = path.resolve(outputZip);
@@ -1036,23 +1260,107 @@ export async function createCanonicalZip({ sourceRoot, outputZip, rootName }) {
   const parentDir = path.dirname(root);
   const baseName = path.basename(root);
 
+  let targetDir = root;
+  let zipCwd = parentDir;
+  let tmpStage = null;
+
   if (baseName === rootName) {
     await normalizeStagingTree(root);
-    await execFileAsync("zip", [
-      "-r", "-q", "-X", archive, baseName,
-      "-x", "*/node_modules/*", "*/.git/*", "*/.DS_Store"
-    ], { cwd: parentDir });
   } else {
-    const tmpStage = await (await import("node:fs/promises")).mkdtemp(path.join(os.tmpdir(), `zip-${rootName}-`));
-    const targetDir = path.join(tmpStage, rootName);
+    tmpStage = await (await import("node:fs/promises")).mkdtemp(path.join(os.tmpdir(), `zip-${rootName}-`));
+    targetDir = path.join(tmpStage, rootName);
     await cp(root, targetDir, { recursive: true });
     await normalizeStagingTree(targetDir);
-    await execFileAsync("zip", [
-      "-r", "-q", "-X", archive, rootName,
-      "-x", "*/node_modules/*", "*/.git/*", "*/.DS_Store"
-    ], { cwd: tmpStage });
-    await rm(tmpStage, { recursive: true, force: true });
+    zipCwd = tmpStage;
   }
+
+  try {
+    const autoloadTargets = await collectComposerAutoloadFileTargets(targetDir);
+
+    const items = await collectCanonicalZipEntries(targetDir);
+    for (const item of items) {
+      if (item.rel.includes("\n") || item.rel.includes("\r")) {
+        throw new Error(`Zip entry relative path contains illegal newline or carriage return characters: ${JSON.stringify(item.rel)}`);
+      }
+    }
+    items.sort((a, b) => {
+      const pa = getCanonicalEntryPriority(a.rel, rootName, autoloadTargets);
+      const pb = getCanonicalEntryPriority(b.rel, rootName, autoloadTargets);
+      if (pa !== pb) return pa - pb;
+      return a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0;
+    });
+
+    const finalZipLines = [];
+    const emittedDirs = new Set();
+
+    function emitDir(dirRel) {
+      if (!dirRel) {
+        if (!emittedDirs.has(rootName)) {
+          finalZipLines.push(`${rootName}/`);
+          emittedDirs.add(rootName);
+        }
+        return;
+      }
+      const parts = dirRel.split("/").filter(Boolean);
+      let cur = rootName;
+      emitDir("");
+      for (const p of parts) {
+        cur += `/${p}`;
+        if (!emittedDirs.has(cur)) {
+          finalZipLines.push(`${cur}/`);
+          emittedDirs.add(cur);
+        }
+      }
+    }
+
+    emitDir("");
+
+    for (const item of items) {
+      if (item.isDirectory) {
+        emitDir(item.rel);
+      } else {
+        const parentRel = path.dirname(item.rel);
+        if (parentRel && parentRel !== ".") {
+          emitDir(parentRel);
+        }
+        finalZipLines.push(`${rootName}/${item.rel}`);
+      }
+    }
+
+    await new Promise((resolve, reject) => {
+      const zipProc = execFile(
+        "zip",
+        ["-q", "-X", archive, "-@"],
+        {
+          cwd: zipCwd,
+          env: {
+            ...process.env,
+            TZ: "UTC",
+            LC_ALL: "C",
+            LANG: "C",
+            SOURCE_DATE_EPOCH: process.env.SOURCE_DATE_EPOCH || "1704067200",
+          },
+        },
+        (err, stdout, stderr) => {
+          if (err) {
+            reject(new Error(`Failed to create canonical ZIP '${archive}': ${stderr || err.message}`));
+          } else {
+            resolve();
+          }
+        }
+      );
+      zipProc.stdin.on("error", () => {
+        // Prevent unhandled EPIPE if zip exits prematurely
+      });
+      zipProc.stdin.write(finalZipLines.join("\n") + "\n");
+      zipProc.stdin.end();
+    });
+  } finally {
+    if (tmpStage) {
+      await rm(tmpStage, { recursive: true, force: true });
+    }
+  }
+
   return archive;
 }
 

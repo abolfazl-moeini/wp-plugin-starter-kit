@@ -19,7 +19,7 @@ For **commercial client delivery, staging, and production release**, plugins mus
 
 1. **Framework Inlining (`inline-wpdev-closure.mjs`):** Inlines only the required parts of the `wpdev` framework into each plugin's `src/FrameworkClosure` without symbol collisions.
 2. **PHP 7.4 Rector Downgrade (`rector-downgrade-php74.php`):** Ensures all syntax features downlevel cleanly to PHP 7.4 compatibility.
-3. **Profile S AST Obfuscator / Spaghetti-fier (`plan3/transformer.php`):** Performs AST-level symbol mangling, local variable scrambling, comment/DocBlock stripping, and code obfuscation while preserving WordPress public APIs and hooks.
+3. **Profile S PHP Token-Based Transformer (`plan3/transformer.php`):** Performs namespace-aware, token-stream symbol mangling (`_f_...`, `_c_...`, `_k_...`, `_m_...`, `_p_...`, `$_v_...`), local variable scrambling, comment/DocBlock stripping, and code obfuscation while preserving string literals, variable introspection scopes, and WordPress public APIs and hooks.
 4. **Hermetic ZIP Packaging & Manifest Generation (`canonical-artifact-manifest.mjs`):** Builds deterministic single-root plugin ZIP archives with SHA-256 integrity digests.
 5. **Transactional WAL Deployment (`build-cache-engine.mjs`):** Employs an immutable Write-Ahead Log (WAL) with automatic pre-swap staging, post-swap verification, and fail-closed rollback.
 6. **Strict Verification Probes (`verify-profile-s-artifact.mjs`):** Executes black-box runtime and syntax linting (`php -l`), DocBlock leakage audits, and class completeness verification before authorizing deployment.
@@ -37,14 +37,16 @@ wp-starter-kit/packages/standalone-build/
 ├── assemble-profile-s-candidate.mjs   # Profile S pipeline assembly coordinator
 ├── rector-downgrade-php74.php         # AST Rector downgrade pass (PHP >=8.0 -> 7.4)
 ├── plan3/
-│   └── transformer.php                # High-speed PHP-Parser AST obfuscator / mangler
+│   └── transformer.php                # High-speed PHP token-based obfuscator / mangler (token_get_all)
 ├── safe-ast-obfuscator.php            # Safe AST obfuscation utility
 ├── heavy-obfuscator.php               # Heavy control-flow flattening & string encryption
 ├── verify-profile-s-artifact.mjs      # Black-box verification runner for assembled ZIPs
 ├── test-dependency-registry.mjs       # Canonical test matrix, tiers & required evidence
 ├── test-impact-map.mjs                # Git diff -> Impacted test suite resolver
 ├── canonical-artifact-manifest.mjs    # Single-root ZIP & embedded manifest inspector
-└── tests/                             # Hermetic unit, contract & artifact test suites (402 tests)
+├── deploy-standalone-plugin.mjs       # Thin CLI wrapper around atomicDeployPlugin (sibling staging)
+├── SOP_PRODUCTION_PLUGIN_DEPLOYMENT.md # Never unzip onto the live plugin directory
+└── tests/                             # Hermetic unit, contract & artifact test suites (72 files, 509 tests)
 ```
 
 ---
@@ -148,9 +150,20 @@ node /Users/moeini/Documents/ideas/extend-kit/wp-starter-kit/packages/standalone
 | `--suite=<name>`              | Selects a specific test suite: `fast`, `contract`, `artifact`, or `full`.                         |
 | `--test-mode=<name>`          | Sets the test resolver mode: `affected`, `contract`, `release`, or `docker-smoke`.                |
 
+### Production ZIP swap (never unzip in place)
+
+Do not extract a plugin ZIP onto the live `plugins/{slug}` directory. That race is what produced `autoload_real.php` `Failed opening required .../functions-closure.php`. Canonical docs: `SOP_PRODUCTION_PLUGIN_DEPLOYMENT.md`.
+
+```bash
+# Already-built ZIP: sibling extract + two sequential renames (not one atomic syscall)
+node build-standalone.mjs --deploy-zip=/path/to/tavangary-core-profile-s.zip tavangary-core
+```
+
+ZIP entry order (bootstrap / `autoload.files` targets before `vendor/autoload.php`) is complementary only. Do not wrap Composer `require` in `file_exists`. Two `rename`s still have a brief “plugin missing” window; that is not zero-downtime and is not this Fatal.
+
 ### Running the Standalone Build Test Suite
 
-The build tool has its own comprehensive test suite (402 tests) verifying AST transformation, WAL rollback, inliner hygiene, and manifest stability:
+The build tool has its own comprehensive test suite (72 canonical files, 509 test declarations, 1,529 assertions) verifying token-based transformation, WAL rollback, inliner hygiene, and manifest stability:
 
 ```bash
 cd /Users/moeini/Documents/ideas/extend-kit/wp-starter-kit/packages/standalone-build

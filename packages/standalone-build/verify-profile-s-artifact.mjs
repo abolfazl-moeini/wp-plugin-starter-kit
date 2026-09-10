@@ -106,9 +106,10 @@ export async function verifyProfileSArtifact({ zipPath, consumer = "tavangary-th
 
     foreach ($files as $f) {
         $code = file_get_contents($f);
-        $tokens = @token_get_all($code);
-        if ($tokens === false) {
-            $syntaxErrors[] = $f;
+        try {
+            $tokens = token_get_all($code, TOKEN_PARSE);
+        } catch (Throwable $e) {
+            $syntaxErrors[] = $f . ': ' . $e->getMessage();
             continue;
         }
         if (basename($f) === $main || strpos($f, '/vendor/') !== false) {

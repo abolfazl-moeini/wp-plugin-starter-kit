@@ -31,7 +31,7 @@ export { TEST_SPEC_MAP, REQUIRED_ARTIFACT_TESTS };
 const execFileAsync = promisify(execFile);
 const fileLimit = pLimit(16);
 
-export const CACHE_SCHEMA_VERSION = 2;
+export const CACHE_SCHEMA_VERSION = 3;
 export const RECEIPT_SCHEMA_VERSION = 2;
 export const TEST_EVIDENCE_SCHEMA_VERSION = 3;
 export const DEPLOY_JOURNAL_SCHEMA_VERSION = 2;
@@ -45,6 +45,32 @@ export const ALLOWED_CONSUMERS = new Set([
   "wpdev-tickets",
   "wpdev-woo-persian",
 ]);
+
+export function isValidConsumerName(consumer) {
+  return typeof consumer === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(consumer);
+}
+
+export function canonicalizePath(targetPath) {
+  if (!targetPath || typeof targetPath !== "string") return targetPath;
+  try {
+    return fs.realpathSync(targetPath);
+  } catch {
+    try {
+      let current = path.resolve(targetPath);
+      const segments = [];
+      while (!fs.existsSync(current)) {
+        const parent = path.dirname(current);
+        if (parent === current) break;
+        segments.unshift(path.basename(current));
+        current = parent;
+      }
+      const realBase = fs.realpathSync(current);
+      return path.join(realBase, ...segments);
+    } catch {
+      return path.resolve(targetPath);
+    }
+  }
+}
 
 export const ALLOWED_JOURNAL_PHASES = new Set([
   "prepared",
@@ -127,8 +153,9 @@ export function validateDeployJournalSchema(data, options = {}) {
         return { valid: false, reason: `Target record contains disallowed key '${tk}'` };
       }
     }
-    if (!t.consumer || !ALLOWED_CONSUMERS.has(t.consumer)) {
-      return { valid: false, reason: `Unknown or disallowed target consumer '${t.consumer}' in journal` };
+    const isAllowed = ALLOWED_CONSUMERS.has(t.consumer) || (options.allowExternalConsumers && isValidConsumerName(t.consumer));
+    if (!t.consumer || !isAllowed) {
+      return { valid: false, reason: `Disallowed target consumer '${t.consumer}' in journal` };
     }
     if (seenConsumers.has(t.consumer)) {
       return { valid: false, reason: `Duplicate consumer '${t.consumer}' in journal targets` };
@@ -186,7 +213,7 @@ export function validateDeployJournalSchema(data, options = {}) {
     if (data.publication.receipts) {
       const ALLOWED_PUB_FILE_KEYS = new Set(["consumer", "existedBefore", "preDigest", "backupStatus", "stagedDigest", "publishStatus", "finalDigest"]);
       for (const [c, r] of Object.entries(data.publication.receipts)) {
-        if (!ALLOWED_CONSUMERS.has(c)) {
+        if (!ALLOWED_CONSUMERS.has(c) && !isValidConsumerName(c)) {
           return { valid: false, reason: `Disallowed consumer '${c}' in publication receipts` };
         }
         if (r.consumer !== c) {
@@ -314,13 +341,13 @@ export async function fsyncDir(dirPath) {
   }
 }
 
-export function validateJournalTransition(previous, next) {
+export function validateJournalTransition(previous, next, options = {}) {
   if (!isPlainObject(previous) || !isPlainObject(next)) {
     return { valid: false, reason: "Journal states must be plain objects" };
   }
-  const valPrev = validateDeployJournalSchema(previous);
+  const valPrev = validateDeployJournalSchema(previous, options);
   if (!valPrev.valid) return { valid: false, reason: `Previous journal state invalid: ${valPrev.reason}` };
-  const valNext = validateDeployJournalSchema(next);
+  const valNext = validateDeployJournalSchema(next, options);
   if (!valNext.valid) return { valid: false, reason: `Next journal state invalid: ${valNext.reason}` };
 
   if (next.txId !== previous.txId) {
@@ -542,18 +569,20 @@ export class TransactionJournalManager {
   #isTerminated;
   #isRolledBack;
   #isCommitted;
+  #allowExternalConsumers;
 
-  constructor({ journalFile, distDir, initialJournal }) {
+  constructor({ journalFile, distDir, initialJournal, allowExternalConsumers = true }) {
     if (!journalFile || typeof journalFile !== "string") {
       throw new Error("TransactionJournalManager requires a valid journalFile path");
     }
     if (!distDir || typeof distDir !== "string") {
       throw new Error("TransactionJournalManager requires a valid distDir path");
     }
-    const val = validateDeployJournalSchema(initialJournal);
+    const val = validateDeployJournalSchema(initialJournal, { allowExternalConsumers });
     if (!val.valid) {
       throw new Error(`Initial deploy journal schema invalid: ${val.reason}`);
     }
+    this.#allowExternalConsumers = allowExternalConsumers;
     this.#journalFile = journalFile;
     this.#distDir = distDir;
     this.#currentJournal = deepFreeze(structuredClone(initialJournal));
@@ -612,12 +641,12 @@ export class TransactionJournalManager {
             }
 
             if (this.#persistedJournal) {
-              const transVal = validateJournalTransition(this.#persistedJournal, candidateState);
+              const transVal = validateJournalTransition(this.#persistedJournal, candidateState, { allowExternalConsumers: this.#allowExternalConsumers });
               if (!transVal.valid) {
                 throw new Error(`Invalid journal transition: ${transVal.reason}`);
               }
             } else {
-              const schemaVal = validateDeployJournalSchema(candidateState);
+              const schemaVal = validateDeployJournalSchema(candidateState, { allowExternalConsumers: this.#allowExternalConsumers });
               if (!schemaVal.valid) {
                 throw new Error(`Deploy journal schema validation failed: ${schemaVal.reason}`);
               }
@@ -651,7 +680,7 @@ export class TransactionJournalManager {
   }
 }
 
-export async function loadDeployJournalRecord(journalFilePath) {
+export async function loadDeployJournalRecord(journalFilePath, options = {}) {
   if (!fs.existsSync(journalFilePath)) {
     return { status: "missing", reason: "Deploy journal file does not exist", journal: null };
   }
@@ -681,7 +710,7 @@ export async function loadDeployJournalRecord(journalFilePath) {
       return { status: "corrupted", reason: "Deploy journal contains invalid JSON", journal: null };
     }
 
-    const val = validateDeployJournalSchema(data);
+    const val = validateDeployJournalSchema(data, options);
     if (!val.valid) {
       return { status: "invalid", reason: val.reason, journal: null };
     }
@@ -703,7 +732,7 @@ export function deriveJournalPaths({ journal, pluginsDir, distDir }) {
   const resolvedDistDir = path.resolve(distDir);
 
   const targets = (journal.targets || []).map((t) => {
-    if (!ALLOWED_CONSUMERS.has(t.consumer)) {
+    if (!ALLOWED_CONSUMERS.has(t.consumer) && !isValidConsumerName(t.consumer)) {
       throw new Error(`deriveJournalPaths: unauthorized consumer '${t.consumer}'`);
     }
     const targetDir = path.join(resolvedPluginsDir, t.consumer);
@@ -776,12 +805,13 @@ export async function recoverInterruptedDeployment({
   pluginsDir,
   distDir,
   logger = console,
+  allowExternalConsumers = false,
 }) {
   if (!fs.existsSync(journalFile)) {
     return { recovered: false, clean: true, reason: "No active deploy journal found" };
   }
 
-  const loaded = await loadDeployJournalRecord(journalFile);
+  const loaded = await loadDeployJournalRecord(journalFile, { allowExternalConsumers });
   if (loaded.status !== "valid") {
     throw new Error(
       `Unsafe or invalid deployment journal encountered (${loaded.reason}). ` +
@@ -1534,7 +1564,7 @@ export function validateBuildCacheSchema(data, options = {}) {
     if (typeof record.manifestDigest !== "string" || !/^[a-f0-9]{64}$/.test(record.manifestDigest)) {
       return { valid: false, reason: `Artifact record for '${consumer}' has invalid manifestDigest` };
     }
-    if (typeof record.compositeFingerprint !== "string" || !/^(?:[a-f0-9]{64})(?::[a-f0-9]{64}){0,4}$/.test(record.compositeFingerprint)) {
+    if (typeof record.compositeFingerprint !== "string" || !/^(?:[a-f0-9]{64})(?::[a-f0-9]{64}){0,4}(?::profile:[a-z0-9_-]+)?(?::opts:[a-f0-9]{1,32})?$/i.test(record.compositeFingerprint)) {
       return { valid: false, reason: `Artifact record for '${consumer}' has invalid compositeFingerprint` };
     }
 
@@ -1563,9 +1593,9 @@ export function validateBuildCacheSchema(data, options = {}) {
           return { valid: false, reason: `Invalid outputPath '${pKey}'='${pVal}' for '${consumer}'` };
         }
         if (expectedDistDir) {
-          const resolvedDist = path.resolve(expectedDistDir);
-          const resolvedOut = path.resolve(pVal);
-          if (!resolvedOut.startsWith(resolvedDist + path.sep)) {
+          const canonDist = canonicalizePath(expectedDistDir);
+          const canonOut = canonicalizePath(pVal);
+          if (!canonOut.startsWith(canonDist + path.sep)) {
             return { valid: false, reason: `OutputPath '${pVal}' for '${consumer}' is not contained within distDir '${expectedDistDir}'` };
           }
         } else if (!pVal.includes("/dist/") && !pVal.startsWith("dist/")) {
@@ -1885,7 +1915,7 @@ export function validateDeployReceiptRecord({
   if (receipt.consumer !== consumer || (receipt.plugin && receipt.plugin !== consumer)) {
     return { valid: false, reason: `Deploy receipt consumer mismatch for ${consumer}` };
   }
-  if (expectedPluginsDir && !ALLOWED_CONSUMERS.has(receipt.consumer)) {
+  if (expectedPluginsDir && (!ALLOWED_CONSUMERS.has(receipt.consumer) && !isValidConsumerName(receipt.consumer))) {
     return { valid: false, reason: `Disallowed consumer '${receipt.consumer}' in deploy receipt` };
   }
   if (receipt.artifactId !== (artifactId || `${consumer}-profile-s`)) {
@@ -1932,6 +1962,7 @@ export async function validateCachedTargetArtifact({
   zipPath,
   consumer,
   expectedCompositeFingerprint,
+  expectedProfile = null,
 }) {
   if (!cacheRecord || typeof cacheRecord !== "object") {
     return { valid: false, reason: "Cache record is missing or invalid object" };
@@ -1947,6 +1978,19 @@ export async function validateCachedTargetArtifact({
 
   if (cacheRecord.compositeFingerprint !== expectedCompositeFingerprint) {
     return { valid: false, reason: "Composite source/toolchain fingerprint changed" };
+  }
+
+  if (expectedProfile) {
+    const normReq = (String(expectedProfile).toLowerCase().trim() === "s" || String(expectedProfile).toLowerCase().trim() === "profile s") ? "profile s" : String(expectedProfile).toLowerCase().trim();
+    const recRaw = String(cacheRecord.profile || cacheRecord.resolvedProfile || "").toLowerCase().trim();
+    const recProf = (recRaw === "s" || recRaw === "profile s") ? "profile s" : recRaw;
+    // NOTE: a missing profile field alone is not a miss when the composite
+    // fingerprint (which now always binds the canonical tier) already matched.
+    // Truly legacy caches miss via the composite comparison above, since the
+    // old format omitted the profile segment entirely.
+    if (recProf && recProf !== normReq) {
+      return { valid: false, reason: `Profile mismatch: requested ${normReq}, cache record has ${recProf}` };
+    }
   }
 
   if (!cacheRecord.zipSha256 || !fs.existsSync(zipPath)) {
@@ -1971,6 +2015,15 @@ export async function validateCachedTargetArtifact({
   const embedded = readEmbeddedManifestFromZip(zipBytes, consumer);
   if (!embedded.valid) {
     return { valid: false, reason: embedded.reason };
+  }
+
+  if (expectedProfile) {
+    const normReq = (String(expectedProfile).toLowerCase().trim() === "s" || String(expectedProfile).toLowerCase().trim() === "profile s") ? "profile s" : String(expectedProfile).toLowerCase().trim();
+    const embRaw = String(embedded.manifest?.profile || embedded.manifest?.resolvedProfile || "").toLowerCase().trim();
+    const embProf = (embRaw === "s" || embRaw === "profile s") ? "profile s" : embRaw;
+    if (embProf && embProf !== normReq) {
+      return { valid: false, reason: `Profile mismatch: requested ${normReq}, embedded manifest has ${embProf}` };
+    }
   }
 
   if (cacheRecord.manifestDigest && cacheRecord.manifestDigest !== embedded.manifestDigest) {
@@ -2008,14 +2061,24 @@ export async function computeToolchainFingerprint(signal = null) {
     `arch:${process.arch}`,
   ];
   const execOpts = signal ? { signal } : {};
-  try {
-    const { stdout } = await execFileAsync("php", ["-r", "echo PHP_VERSION;"], execOpts);
-    parts.push(`php:${stdout.trim()}`);
-  } catch (err) {
-    if (signal?.aborted || err.name === "AbortError") {
-      throw err;
+  const probes = [
+    ["php", ["-r", "echo PHP_VERSION;"], "php"],
+    ["zip", ["-v"], "zip"],
+    ["unzip", ["-v"], "unzip"],
+    ["rsync", ["--version"], "rsync"],
+    ["composer", ["--version"], "composer"],
+  ];
+  for (const [cmd, args, key] of probes) {
+    try {
+      const { stdout } = await execFileAsync(cmd, args, execOpts);
+      const line = String(stdout || "").split("\n")[0].trim();
+      parts.push(`${key}:${line}`);
+    } catch (err) {
+      if (signal?.aborted || err.name === "AbortError") {
+        throw err;
+      }
+      parts.push(`${key}:unavailable`);
     }
-    parts.push("php:unavailable");
   }
 
   const kitRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -2201,9 +2264,19 @@ async function collectToolFiles(scriptDir, contentRoot, signal = null) {
     }
   }
   await walk(scriptDir);
-  for (const extra of ["package.json", "package-lock.json", "composer.json", "composer.lock"]) {
-    const extraPath = path.join(contentRoot, extra);
-    if (fs.existsSync(extraPath)) files.push(extraPath);
+  const kitRoot = path.resolve(scriptDir, "../..");
+  const candidateRoots = [
+    contentRoot,
+    scriptDir,
+    kitRoot,
+  ];
+  for (const cRoot of new Set(candidateRoots)) {
+    for (const extra of ["package.json", "package-lock.json", "composer.json", "composer.lock"]) {
+      const extraPath = path.join(cRoot, extra);
+      if (fs.existsSync(extraPath) && !files.includes(extraPath)) {
+        files.push(extraPath);
+      }
+    }
   }
   return files;
 }
@@ -2229,6 +2302,7 @@ export async function computeToolsFingerprint(scriptDir, ioLimit = fileLimit, si
   const toolFiles = await collectToolFiles(scriptDir, contentRoot, signal);
   const toolFileMap = {};
   const isToolsName = path.basename(scriptDir) === "tools";
+  const kitRoot = path.resolve(scriptDir, "../..");
   const tasks = toolFiles.map((p) =>
     ioLimit(async () => {
       if (signal?.aborted) throw new Error("Fingerprint traversal aborted");
@@ -2239,12 +2313,22 @@ export async function computeToolsFingerprint(scriptDir, ioLimit = fileLimit, si
       const content = await readFile(p);
       const sha256 = crypto.createHash("sha256").update(content).digest("hex");
       let rel;
-      if (isToolsName) {
-        rel = path.relative(contentRoot, p).split(path.sep).join("/");
-      } else if (p.startsWith(scriptDir)) {
-        rel = "tools/" + path.relative(scriptDir, p).split(path.sep).join("/");
+      if (p.startsWith(scriptDir)) {
+        if (isToolsName) {
+          rel = path.relative(contentRoot, p).split(path.sep).join("/");
+        } else {
+          rel = "tools/" + path.relative(scriptDir, p).split(path.sep).join("/");
+        }
+      } else if (p.startsWith(kitRoot)) {
+        rel = "tools/kit/" + path.relative(kitRoot, p).split(path.sep).join("/");
+      } else if (p.startsWith(contentRoot)) {
+        rel = "tools/content/" + path.relative(contentRoot, p).split(path.sep).join("/");
       } else {
-        rel = path.relative(contentRoot, p).split(path.sep).join("/");
+        rel = "tools/" + path.basename(p);
+      }
+      rel = rel.split(path.sep).join("/");
+      if (!rel.startsWith("tools/")) {
+        rel = "tools/" + rel.replace(/^\.+[\/\\]*/, "");
       }
       toolFileMap[rel] = sha256;
       return `${rel}:${sha256}`;
@@ -2313,15 +2397,35 @@ export function computePluginCompositeFingerprint({
   wpdevFingerprint,
   pluginSourceFingerprint,
   toolchainFingerprint = "",
+  profile = "clean",
+  options = {},
 }) {
   const normTools = (toolsFingerprint && toolsFingerprint !== "missing") ? toolsFingerprint : "0".repeat(64);
   const normWpdev = (wpdevFingerprint && wpdevFingerprint !== "missing") ? wpdevFingerprint : "0".repeat(64);
   const normPlugin = (pluginSourceFingerprint && pluginSourceFingerprint !== "missing") ? pluginSourceFingerprint : "0".repeat(64);
   const normToolchain = (toolchainFingerprint && toolchainFingerprint !== "missing") ? toolchainFingerprint : "";
+  const rawProfile = String(profile || "clean").toLowerCase().trim();
+  // Canonical profile identity: "s" and "Profile S" (and common aliases) are the
+  // same obfuscated tier. Everything else is "clean". Always included so that
+  // clean <-> S switches with identical sources can never reuse the same artifact.
+  const normProfile = (rawProfile === "s" || rawProfile === "profile s" || rawProfile === "profile-s" || rawProfile === "profiles" || rawProfile === "obfuscate" || rawProfile === "obfuscated") ? "s" : "clean";
 
   const parts = [normTools, normWpdev, normPlugin];
   if (normToolchain) {
     parts.push(normToolchain);
+  }
+  parts.push(`profile:${normProfile}`);
+  if (options && typeof options === "object" && Object.keys(options).length > 0) {
+    const encode = (value) => {
+      if (value === undefined) return "null";
+      if (value === null || typeof value !== "object") return JSON.stringify(value);
+      if (Array.isArray(value)) return `[${value.map(encode).join(",")}]`;
+      const innerKeys = Object.keys(value).sort();
+      return `{${innerKeys.map((inner) => `${JSON.stringify(inner)}:${encode(value[inner])}`).join(",")}}`;
+    };
+    const optKeys = Object.keys(options).sort();
+    const optStr = optKeys.map((k) => `${k}=${encode(options[k])}`).join(";");
+    parts.push(`opts:${crypto.createHash("sha256").update(optStr).digest("hex").slice(0, 16)}`);
   }
   return parts.join(":");
 }
@@ -2331,6 +2435,8 @@ export function planDependencyGraphBuild({
   previousCache = {},
   currentFingerprints,
   mode = "changed", // "all", "changed", "force"
+  profile = "clean",
+  options = {},
 }) {
   const plan = {};
   const isForce = mode === "force";
@@ -2345,6 +2451,8 @@ export function planDependencyGraphBuild({
       wpdevFingerprint: currentFingerprints.wpdev,
       pluginSourceFingerprint: currentPluginSource,
       toolchainFingerprint: currentFingerprints.toolchain || "",
+      profile,
+      options,
     });
 
     if (isForce) {

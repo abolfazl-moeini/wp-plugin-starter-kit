@@ -153,6 +153,186 @@ export const CANONICAL_TEST_REGISTRY = {
     "releaseSameRun": false,
     "tier": "contract"
   },
+  "f01-atomic-deploy-rollback-fsync.test.mjs": {
+    "tools": [
+      "tools/build-all-standalone-plugins.mjs",
+      "tools/build-cache-engine.mjs"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "contract"
+  },
+  "f02-transaction-locking.test.mjs": {
+    "tools": [
+      "tools/build-all-standalone-plugins.mjs",
+      "tools/build-cache-engine.mjs"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "contract"
+  },
+  "f03-direct-deploy-journal-recovery.test.mjs": {
+    "tools": [
+      "tools/build-all-standalone-plugins.mjs",
+      "tools/build-cache-engine.mjs",
+      "tools/deploy-standalone-plugin.mjs"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "contract"
+  },
+  "f04-zip-snapshot-integrity.test.mjs": {
+    "tools": [
+      "tools/build-all-standalone-plugins.mjs",
+      "tools/canonical-artifact-manifest.mjs",
+      "tools/artifact-fixture-helper.mjs"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "contract"
+  },
+  "f05-f06-cache-profile-separation.test.mjs": {
+    "tools": [
+      "tools/build-cache-engine.mjs",
+      "tools/assemble-profile-s-candidate.mjs",
+      "tools/build-all-standalone-plugins.mjs"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "contract"
+  },
+  "f07-php74-target-syntax-gate.test.mjs": {
+    "tools": [
+      "tools/profile-s-fail-closed.mjs",
+      "tools/assemble-profile-s-candidate.mjs"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "contract"
+  },
+  "f08-path-and-autoload-validation.test.mjs": {
+    "tools": [
+      "tools/canonical-artifact-manifest.mjs",
+      "tools/build-all-standalone-plugins.mjs",
+      "tools/deploy-standalone-plugin.mjs"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "contract"
+  },
+  "f09-f10-f11-transformer-semantics.test.mjs": {
+    "tools": [
+      "tools/plan3/transformer.php",
+      "tools/profile-s-fail-closed.mjs"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "contract"
+  },
+  "f12-consumer-release-alignment.test.mjs": {
+    "tools": [
+      "tools/assemble-profile-s-candidate.mjs",
+      "tools/canonical-artifact-manifest.mjs"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "contract"
+  },
+  "f13-in-flight-drain-and-health.test.mjs": {
+    "tools": [
+      "tools/build-all-standalone-plugins.mjs",
+      "tools/deploy-standalone-plugin.mjs"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "contract"
+  },
+  "f14-bounded-inflate-and-zip-reproducibility.test.mjs": {
+    "tools": [
+      "tools/canonical-artifact-manifest.mjs",
+      "tools/build-all-standalone-plugins.mjs"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "contract"
+  },
   "framework-closure-inventory.test.mjs": {
     "tools": [
       "tools/framework-closure-inventory.mjs"
@@ -201,6 +381,23 @@ export const CANONICAL_TEST_REGISTRY = {
   "hook-contract-inventory.test.mjs": {
     "tools": [
       "tools/hook-contract-inventory.mjs"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "contract"
+  },
+  "in-place-unzip-race.test.mjs": {
+    "tools": [
+      "tools/canonical-artifact-manifest.mjs",
+      "tools/build-all-standalone-plugins.mjs",
+      "tools/deploy-standalone-plugin.mjs"
     ],
     "artifacts": [],
     "requiredBy": [],
@@ -360,7 +557,8 @@ export const CANONICAL_TEST_REGISTRY = {
     "tools": [
       "tools/profile-s-fail-closed.mjs",
       "tools/assemble-profile-s-candidate.mjs",
-      "tools/build-all-standalone-plugins.mjs"
+      "tools/build-all-standalone-plugins.mjs",
+      "tools/build-plan.mjs"
     ],
     "artifacts": [],
     "requiredBy": [],
@@ -551,6 +749,74 @@ export const CANONICAL_TEST_REGISTRY = {
     "releaseSameRun": false,
     "tier": "unit"
   },
+  "task3-private-members-and-constants.test.mjs": {
+    "tools": [
+      "tools/plan3/transformer.php",
+      "tools/plan3/symbol-analyzer.php"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "fast",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "unit"
+  },
+  "task4-scope-capture-and-template.test.mjs": {
+    "tools": [
+      "tools/plan3/transformer.php",
+      "tools/plan3/symbol-analyzer.php"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "fast",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "unit"
+  },
+  "task5-protect-literals-and-comments.test.mjs": {
+    "tools": [
+      "tools/plan3/transformer.php",
+      "tools/plan3/symbol-analyzer.php"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "fast",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "unit"
+  },
+  "task6-namespaces-and-public-boundaries.test.mjs": {
+    "tools": [
+      "tools/plan3/transformer.php",
+      "tools/plan3/symbol-analyzer.php"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "fast",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "unit"
+  },
   "tavangary-core-artifact.test.mjs": {
     "tools": [
       "tools/assemble-profile-s-candidate.mjs",
@@ -633,6 +899,22 @@ export const CANONICAL_TEST_REGISTRY = {
     "criticality": "normal",
     "allowedModes": [
       "affected",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "unit"
+  },
+  "transformer-fixture-harness.test.mjs": {
+    "tools": [
+      "tools/plan3/transformer.php"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "fast",
       "full",
       "release"
     ],

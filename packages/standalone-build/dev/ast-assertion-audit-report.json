@@ -1,13 +1,13 @@
 {
   "schemaVersion": "1.0.0",
-  "generatedAt": "2026-09-05T06:16:01.803Z",
+  "generatedAt": "2026-09-06T17:42:44.449Z",
   "testsDir": "/Users/moeini/Documents/ideas/extend-kit/wp-starter-kit/packages/standalone-build/tests",
-  "totalFiles": 60,
-  "totalRootTests": 454,
-  "totalAssertions": 1344,
-  "totalRejections": 198,
-  "totalThrows": 40,
-  "totalNegativeChecks": 238,
+  "totalFiles": 72,
+  "totalRootTests": 509,
+  "totalAssertions": 1529,
+  "totalRejections": 220,
+  "totalThrows": 58,
+  "totalNegativeChecks": 278,
   "totalSkips": 0,
   "totalTodos": 0,
   "totalOnlys": 0,
@@ -680,6 +680,622 @@
       ]
     },
     {
+      "file": "f01-atomic-deploy-rollback-fsync.test.mjs",
+      "testCount": 4,
+      "assertions": 16,
+      "rejections": 0,
+      "throws": 0,
+      "negativeChecks": 0,
+      "skips": 0,
+      "todos": 0,
+      "onlys": 0,
+      "tests": [
+        {
+          "name": "F01: Failure after target backup rename restores previous version without deleting backup in finally",
+          "line": 40,
+          "assertions": 4,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F01: Failure after candidate swap rolls back candidate and restores previous version",
+          "line": 74,
+          "assertions": 4,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F01: Failure during post-commit backup purge does NOT replace healthy target with backup",
+          "line": 107,
+          "assertions": 3,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F01: Failed rollback raises composite error with original and rollback errors",
+          "line": 139,
+          "assertions": 5,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        }
+      ]
+    },
+    {
+      "file": "f02-transaction-locking.test.mjs",
+      "testCount": 4,
+      "assertions": 12,
+      "rejections": 0,
+      "throws": 0,
+      "negativeChecks": 0,
+      "skips": 0,
+      "todos": 0,
+      "onlys": 0,
+      "tests": [
+        {
+          "name": "F02: Lock acquisition rejects reclaim when process.kill returns EPERM",
+          "line": 14,
+          "assertions": 3,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F02: Lock acquisition reclaims dead lock only on ESRCH with atomic rename serialization",
+          "line": 56,
+          "assertions": 5,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F02: canonicalizePath resolves symlinks to identical canonical targets",
+          "line": 94,
+          "assertions": 1,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F02: runPipelineOrchestration holds workspace lock and blocks concurrent run from recovering active journal",
+          "line": 110,
+          "assertions": 3,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        }
+      ]
+    },
+    {
+      "file": "f03-direct-deploy-journal-recovery.test.mjs",
+      "testCount": 2,
+      "assertions": 12,
+      "rejections": 0,
+      "throws": 0,
+      "negativeChecks": 0,
+      "skips": 0,
+      "todos": 0,
+      "onlys": 0,
+      "tests": [
+        {
+          "name": "F03: Direct deploy executes transactionally, creates receipt and cleans journal upon commit",
+          "line": 46,
+          "assertions": 7,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F03: Interrupted direct deploy (SIGKILL after backup rename) is recovered on subsequent run",
+          "line": 90,
+          "assertions": 5,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        }
+      ]
+    },
+    {
+      "file": "f04-zip-snapshot-integrity.test.mjs",
+      "testCount": 3,
+      "assertions": 6,
+      "rejections": 2,
+      "throws": 0,
+      "negativeChecks": 2,
+      "skips": 0,
+      "todos": 0,
+      "onlys": 0,
+      "tests": [
+        {
+          "name": "F04: Reject deployment when input ZIP is a symbolic link",
+          "line": 47,
+          "assertions": 1,
+          "rejects": 1,
+          "throwsCount": 0,
+          "negativeBranches": 1,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F04: ZIP swapped after preflight does not alter extracted candidate (immutable snapshot)",
+          "line": 67,
+          "assertions": 1,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F04: artifact-fixture-helper rejects symlink ZIP and extracts via immutable snapshot",
+          "line": 106,
+          "assertions": 4,
+          "rejects": 1,
+          "throwsCount": 0,
+          "negativeBranches": 1,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        }
+      ]
+    },
+    {
+      "file": "f05-f06-cache-profile-separation.test.mjs",
+      "testCount": 5,
+      "assertions": 14,
+      "rejections": 1,
+      "throws": 0,
+      "negativeChecks": 1,
+      "skips": 0,
+      "todos": 0,
+      "onlys": 0,
+      "tests": [
+        {
+          "name": "F05: computePluginCompositeFingerprint separates clean and profile s",
+          "line": 18,
+          "assertions": 3,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F05: planDependencyGraphBuild triggers rebuild on profile change without source change",
+          "line": 48,
+          "assertions": 2,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F05: validateCachedTargetArtifact rejects profile mismatch",
+          "line": 95,
+          "assertions": 3,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F05: computeToolchainFingerprint includes zip, unzip, rsync, and composer",
+          "line": 153,
+          "assertions": 2,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F06: assembleProfileSCandidate does not overwrite existing dist artifact on failure",
+          "line": 159,
+          "assertions": 4,
+          "rejects": 1,
+          "throwsCount": 0,
+          "negativeBranches": 1,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        }
+      ]
+    },
+    {
+      "file": "f07-php74-target-syntax-gate.test.mjs",
+      "testCount": 4,
+      "assertions": 5,
+      "rejections": 4,
+      "throws": 0,
+      "negativeChecks": 4,
+      "skips": 0,
+      "todos": 0,
+      "onlys": 0,
+      "tests": [
+        {
+          "name": "F07: validatePhpSyntaxTree rejects constructor property promotion",
+          "line": 9,
+          "assertions": 1,
+          "rejects": 1,
+          "throwsCount": 0,
+          "negativeBranches": 1,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F07: validatePhpSyntaxTree rejects intersection types in parameter and return",
+          "line": 25,
+          "assertions": 2,
+          "rejects": 2,
+          "throwsCount": 0,
+          "negativeBranches": 2,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F07: validatePhpSyntaxTree validates vendor and vendor-prefixed directories",
+          "line": 54,
+          "assertions": 1,
+          "rejects": 1,
+          "throwsCount": 0,
+          "negativeBranches": 1,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F07: validatePhpSyntaxTree accepts compliant PHP 7.4 code",
+          "line": 76,
+          "assertions": 1,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        }
+      ]
+    },
+    {
+      "file": "f08-path-and-autoload-validation.test.mjs",
+      "testCount": 4,
+      "assertions": 13,
+      "rejections": 7,
+      "throws": 6,
+      "negativeChecks": 13,
+      "skips": 0,
+      "todos": 0,
+      "onlys": 0,
+      "tests": [
+        {
+          "name": "F08: collectComposerAutoloadFileTargets rejects traversal and escaping targets",
+          "line": 11,
+          "assertions": 3,
+          "rejects": 3,
+          "throwsCount": 0,
+          "negativeBranches": 3,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F08: collectComposerAutoloadFileTargets rejects unsupported/corrupted format",
+          "line": 57,
+          "assertions": 1,
+          "rejects": 1,
+          "throwsCount": 0,
+          "negativeBranches": 1,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F08: parseDeployArgs strictly rejects unknown flags, empty values, and traversal",
+          "line": 77,
+          "assertions": 6,
+          "rejects": 0,
+          "throwsCount": 6,
+          "negativeBranches": 6,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F08: atomicDeployPlugin validates slug, bootstrap, and tokens before mutation",
+          "line": 93,
+          "assertions": 3,
+          "rejects": 3,
+          "throwsCount": 0,
+          "negativeBranches": 3,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        }
+      ]
+    },
+    {
+      "file": "f09-f10-f11-transformer-semantics.test.mjs",
+      "testCount": 3,
+      "assertions": 17,
+      "rejections": 0,
+      "throws": 0,
+      "negativeChecks": 0,
+      "skips": 0,
+      "todos": 0,
+      "onlys": 0,
+      "tests": [
+        {
+          "name": "F09: function map preserves namespace identity, prevents collisions, and resolves use function / qualified calls",
+          "line": 16,
+          "assertions": 6,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F10: preserves string literals, gettext, array keys, and protects scopes with variable introspection",
+          "line": 128,
+          "assertions": 4,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F11: transformer exits non-zero on I/O failure and records verified manifest records",
+          "line": 269,
+          "assertions": 7,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        }
+      ]
+    },
+    {
+      "file": "f12-consumer-release-alignment.test.mjs",
+      "testCount": 4,
+      "assertions": 25,
+      "rejections": 0,
+      "throws": 8,
+      "negativeChecks": 8,
+      "skips": 0,
+      "todos": 0,
+      "onlys": 0,
+      "tests": [
+        {
+          "name": "F12: Profile flag parsing rejects conflicts in both orders and whitespace/equals variants",
+          "line": 22,
+          "assertions": 18,
+          "rejects": 0,
+          "throwsCount": 8,
+          "negativeBranches": 8,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F12: resolveCanonicalAssembler resolves standalone assembleProfileSCandidate",
+          "line": 105,
+          "assertions": 3,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F12: Generic release with --obfuscate dumps Composer classmap for mangled symbols",
+          "line": 115,
+          "assertions": 3,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F12: Consumer release adapter routes registered consumers to canonical assembler",
+          "line": 177,
+          "assertions": 1,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        }
+      ]
+    },
+    {
+      "file": "f13-in-flight-drain-and-health.test.mjs",
+      "testCount": 4,
+      "assertions": 13,
+      "rejections": 5,
+      "throws": 0,
+      "negativeChecks": 5,
+      "skips": 0,
+      "todos": 0,
+      "onlys": 0,
+      "tests": [
+        {
+          "name": "F13: parseDeployArgs accepts --health-url and --health-token",
+          "line": 25,
+          "assertions": 4,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F13: executeWebRuntimeHealthCheck verifies valid response and rejects login redirects or fatal errors",
+          "line": 40,
+          "assertions": 5,
+          "rejects": 4,
+          "throwsCount": 0,
+          "negativeBranches": 4,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F13: Failed web healthCheck triggers rollback and preserves backup without deletion",
+          "line": 106,
+          "assertions": 3,
+          "rejects": 1,
+          "throwsCount": 0,
+          "negativeBranches": 1,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F13: In-flight late include simulation: traffic drain prevents late include missing require race",
+          "line": 193,
+          "assertions": 1,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        }
+      ]
+    },
+    {
+      "file": "f14-bounded-inflate-and-zip-reproducibility.test.mjs",
+      "testCount": 6,
+      "assertions": 11,
+      "rejections": 1,
+      "throws": 4,
+      "negativeChecks": 5,
+      "skips": 0,
+      "todos": 0,
+      "onlys": 0,
+      "tests": [
+        {
+          "name": "F14: Bounded inflate fails closed when deflated stream exceeds declared uncompressed size",
+          "line": 90,
+          "assertions": 1,
+          "rejects": 0,
+          "throwsCount": 1,
+          "negativeBranches": 1,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F14: Declared uncompressed size exceeding MAX_ENTRY_UNCOMPRESSED_BYTES is rejected before inflate",
+          "line": 109,
+          "assertions": 1,
+          "rejects": 0,
+          "throwsCount": 1,
+          "negativeBranches": 1,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F14: Child process rejects zip bomb stream without host OOM or uncaught exception",
+          "line": 124,
+          "assertions": 1,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F14: ZIP entry name containing newline or carriage return is rejected with explicit error",
+          "line": 163,
+          "assertions": 3,
+          "rejects": 1,
+          "throwsCount": 2,
+          "negativeBranches": 3,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F14: Canonical ZIP creation is bit-for-bit deterministic across timezones and locales",
+          "line": 216,
+          "assertions": 1,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "F14: Embedded manifest parser enforces bounded inflate and size limits",
+          "line": 288,
+          "assertions": 4,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        }
+      ]
+    },
+    {
       "file": "framework-closure-inventory.test.mjs",
       "testCount": 3,
       "assertions": 7,
@@ -853,6 +1469,118 @@
         {
           "name": "rejects a source-tree symlink instead of silently omitting it from hook evidence",
           "line": 16,
+          "assertions": 2,
+          "rejects": 1,
+          "throwsCount": 0,
+          "negativeBranches": 1,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        }
+      ]
+    },
+    {
+      "file": "in-place-unzip-race.test.mjs",
+      "testCount": 9,
+      "assertions": 28,
+      "rejections": 2,
+      "throws": 0,
+      "negativeChecks": 2,
+      "skips": 0,
+      "todos": 0,
+      "onlys": 0,
+      "tests": [
+        {
+          "name": "In-Place Unzip Race: reproduces exact autoload_real.php Fatal error when tree is partially extracted",
+          "line": 16,
+          "assertions": 2,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "collectComposerAutoloadFileTargets: parses Composer __DIR__ '/../..' concatenation",
+          "line": 92,
+          "assertions": 1,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "Canonical ZIP Ordering: functions-closure.php and all autoload.files precede vendor autoloaders",
+          "line": 117,
+          "assertions": 12,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "Atomic deploy: preflight fails closed if mandatory autoload target is missing from candidate",
+          "line": 227,
+          "assertions": 3,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "deploy-standalone-plugin CLI: executes successful atomic deployment via CLI wrapper",
+          "line": 279,
+          "assertions": 2,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "deploy-standalone-plugin CLI: resolves pluginsDir and contentRoot without explicit content-root flag",
+          "line": 308,
+          "assertions": 2,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "deploy-standalone-plugin CLI: missing zip returns 1 without exiting the process",
+          "line": 336,
+          "assertions": 2,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "Atomic deploy: fails closed if FrameworkClosure directory exists without functions-closure.php",
+          "line": 344,
+          "assertions": 2,
+          "rejects": 1,
+          "throwsCount": 0,
+          "negativeBranches": 1,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "Atomic deploy: registered shared-framework consumer fails closed without functions-closure.php",
+          "line": 372,
           "assertions": 2,
           "rejects": 1,
           "throwsCount": 0,
@@ -1300,7 +2028,7 @@
         },
         {
           "name": "Regression 23: AST Transformer integration: transforms representative PHP fixture, mangles symbols, strips comments, and verifies valid PHP syntax",
-          "line": 1125,
+          "line": 1131,
           "assertions": 6,
           "rejects": 0,
           "throwsCount": 0,
@@ -1425,7 +2153,7 @@
       "tests": [
         {
           "name": "Failure Scenario 1: Test failure after build prevents cache commit and deployment",
-          "line": 62,
+          "line": 67,
           "assertions": 7,
           "rejects": 0,
           "throwsCount": 0,
@@ -1436,7 +2164,7 @@
         },
         {
           "name": "Failure Scenario 2: ZIP corruption on cache hit triggers validation failure and safe rebuild requirement",
-          "line": 120,
+          "line": 125,
           "assertions": 3,
           "rejects": 0,
           "throwsCount": 0,
@@ -1447,7 +2175,7 @@
         },
         {
           "name": "Failure Scenario 3: Deploy failure after tests restores backup and leaves target intact",
-          "line": 160,
+          "line": 165,
           "assertions": 4,
           "rejects": 0,
           "throwsCount": 0,
@@ -1458,7 +2186,7 @@
         },
         {
           "name": "Failure Scenario 4: Target file drift on disk is detected and prevents false deploy skip",
-          "line": 200,
+          "line": 205,
           "assertions": 2,
           "rejects": 0,
           "throwsCount": 0,
@@ -1469,7 +2197,7 @@
         },
         {
           "name": "Failure Scenario 5: Clean re-run after failure executes required DAG nodes successfully",
-          "line": 227,
+          "line": 232,
           "assertions": 2,
           "rejects": 0,
           "throwsCount": 0,
@@ -1480,7 +2208,7 @@
         },
         {
           "name": "Failure Scenario 6: Production orchestrator strictly rejects invalid cache files in deploy/release mode",
-          "line": 270,
+          "line": 275,
           "assertions": 2,
           "rejects": 2,
           "throwsCount": 0,
@@ -1491,7 +2219,7 @@
         },
         {
           "name": "Failure Scenario 7: Production orchestrator rollback on smoke failure leaves target directory, receipts, and cache untouched",
-          "line": 321,
+          "line": 326,
           "assertions": 8,
           "rejects": 0,
           "throwsCount": 0,
@@ -1502,7 +2230,7 @@
         },
         {
           "name": "Failure Scenario 8: Failure immediately after swap (during_swap) on non-existent initial target cleans up new target",
-          "line": 498,
+          "line": 503,
           "assertions": 4,
           "rejects": 0,
           "throwsCount": 0,
@@ -1513,7 +2241,7 @@
         },
         {
           "name": "Failure Scenario 9: Multi-file commit failure (during_commit) leaves zero receipts and untouched cache",
-          "line": 629,
+          "line": 634,
           "assertions": 4,
           "rejects": 0,
           "throwsCount": 0,
@@ -1524,7 +2252,7 @@
         },
         {
           "name": "Failure Scenario 10: Startup journal recovery restores interrupted deployment before running new build",
-          "line": 763,
+          "line": 768,
           "assertions": 2,
           "rejects": 0,
           "throwsCount": 0,
@@ -1535,7 +2263,7 @@
         },
         {
           "name": "Failure Scenario 11: Crash after backup_renamed but before candidate_swapped is safely recovered by startup recovery",
-          "line": 896,
+          "line": 901,
           "assertions": 5,
           "rejects": 0,
           "throwsCount": 0,
@@ -1546,7 +2274,7 @@
         },
         {
           "name": "Failure Scenario 12: Rollback failure preserves journal with rollback_failed phase and halts future builds",
-          "line": 1040,
+          "line": 1045,
           "assertions": 3,
           "rejects": 0,
           "throwsCount": 0,
@@ -1557,7 +2285,7 @@
         },
         {
           "name": "Failure Scenario 13: Deploy-skip integrity check rejects tampered non-bootstrap file or symlink",
-          "line": 1107,
+          "line": 1112,
           "assertions": 2,
           "rejects": 0,
           "throwsCount": 0,
@@ -1568,7 +2296,7 @@
         },
         {
           "name": "Failure Scenario 14: Rollback of previously-absent files (cache/receipt not existing prior to tx) deletes newly published files",
-          "line": 1157,
+          "line": 1162,
           "assertions": 5,
           "rejects": 0,
           "throwsCount": 0,
@@ -1579,7 +2307,7 @@
         },
         {
           "name": "Failure Scenario 15: Crash in the middle of individual receipt publication recovers cleanly",
-          "line": 1250,
+          "line": 1255,
           "assertions": 3,
           "rejects": 0,
           "throwsCount": 0,
@@ -1590,7 +2318,7 @@
         },
         {
           "name": "Failure Scenario 16: Startup recovery in committed phase verifies integrity and completes forward cleanup",
-          "line": 1336,
+          "line": 1341,
           "assertions": 6,
           "rejects": 0,
           "throwsCount": 0,
@@ -1601,7 +2329,7 @@
         },
         {
           "name": "Failure Scenario 17: Recovery strictly rejects symlinks in txBackupDir, txStagingDir, and .deploy-receipts",
-          "line": 1427,
+          "line": 1432,
           "assertions": 1,
           "rejects": 1,
           "throwsCount": 0,
@@ -1612,7 +2340,7 @@
         },
         {
           "name": "Failure Scenario 18: validateJournalTransition strictly rejects invalid transitions and non-monotonic revisions",
-          "line": 1477,
+          "line": 1482,
           "assertions": 7,
           "rejects": 0,
           "throwsCount": 0,
@@ -1623,7 +2351,7 @@
         },
         {
           "name": "Failure Scenario 19: Release same-run test evidence replay from prior transaction is rejected",
-          "line": 1550,
+          "line": 1555,
           "assertions": 1,
           "rejects": 0,
           "throwsCount": 0,
@@ -1634,7 +2362,7 @@
         },
         {
           "name": "Failure Scenario 20: Strict Intent-Before-Completion enforcement in validateJournalTransition",
-          "line": 1591,
+          "line": 1596,
           "assertions": 6,
           "rejects": 0,
           "throwsCount": 0,
@@ -1645,7 +2373,7 @@
         },
         {
           "name": "Failure Scenario 21: validateJournalTransition enforces exact +1 revision increment",
-          "line": 1659,
+          "line": 1664,
           "assertions": 3,
           "rejects": 0,
           "throwsCount": 0,
@@ -1656,7 +2384,7 @@
         },
         {
           "name": "Failure Scenario 22: Rejection of extra or unknown keys in deploy journal schema",
-          "line": 1686,
+          "line": 1691,
           "assertions": 3,
           "rejects": 0,
           "throwsCount": 0,
@@ -1667,7 +2395,7 @@
         },
         {
           "name": "Failure Scenario 23: Rollback fails safely when existedBefore backup is missing, symlink, or corrupt",
-          "line": 1725,
+          "line": 1730,
           "assertions": 2,
           "rejects": 1,
           "throwsCount": 0,
@@ -1678,7 +2406,7 @@
         },
         {
           "name": "Failure Scenario 24: Recovery in committed phase is idempotent across multiple invocations",
-          "line": 1787,
+          "line": 1792,
           "assertions": 6,
           "rejects": 0,
           "throwsCount": 0,
@@ -1689,7 +2417,7 @@
         },
         {
           "name": "Failure Scenario 25: TransactionJournalManager serializes mutations, increments revision by exactly +1, and rejects writes after termination",
-          "line": 1868,
+          "line": 1873,
           "assertions": 12,
           "rejects": 1,
           "throwsCount": 0,
@@ -1700,7 +2428,7 @@
         },
         {
           "name": "Failure Scenario 26: TransactionJournalManager serializes concurrent asynchronous updates without transition race conditions",
-          "line": 1955,
+          "line": 1960,
           "assertions": 4,
           "rejects": 0,
           "throwsCount": 0,
@@ -1711,7 +2439,7 @@
         },
         {
           "name": "Failure Scenario 27: validateJournalTransition strictly rejects adding, removing, or reordering targets after registration",
-          "line": 2032,
+          "line": 2037,
           "assertions": 6,
           "rejects": 0,
           "throwsCount": 0,
@@ -1722,7 +2450,7 @@
         },
         {
           "name": "Failure Scenario 28: State machine enforces Commit Point Invariant: transition from committed to rolling_back is strictly rejected",
-          "line": 2100,
+          "line": 2105,
           "assertions": 2,
           "rejects": 0,
           "throwsCount": 0,
@@ -1733,7 +2461,7 @@
         },
         {
           "name": "Failure Scenario 29: State machine strictly rejects published status with mismatched finalDigest vs stagedDigest",
-          "line": 2156,
+          "line": 2161,
           "assertions": 2,
           "rejects": 0,
           "throwsCount": 0,
@@ -1744,7 +2472,7 @@
         },
         {
           "name": "Failure Scenario 30: State machine rejects backupsPurged=true unless phase is cleanup_complete",
-          "line": 2197,
+          "line": 2202,
           "assertions": 2,
           "rejects": 0,
           "throwsCount": 0,
@@ -1755,7 +2483,7 @@
         },
         {
           "name": "Failure Scenario 31: Disallowed or extra keys inside error object are rejected by schema validation",
-          "line": 2223,
+          "line": 2228,
           "assertions": 2,
           "rejects": 0,
           "throwsCount": 0,
@@ -1766,7 +2494,7 @@
         },
         {
           "name": "Failure Scenario 32: Multi-target deployment with candidate digest transition and verification on isolated fixture",
-          "line": 2249,
+          "line": 2254,
           "assertions": 10,
           "rejects": 0,
           "throwsCount": 0,
@@ -1777,7 +2505,7 @@
         },
         {
           "name": "Failure Scenario 33: Target candidateZipSha mutability invariant strictly enforced",
-          "line": 2428,
+          "line": 2433,
           "assertions": 3,
           "rejects": 0,
           "throwsCount": 0,
@@ -1788,7 +2516,7 @@
         },
         {
           "name": "Failure Scenario 34: Missing or corrupted target backup directory during rollback transitions to rollback_failed",
-          "line": 2478,
+          "line": 2483,
           "assertions": 3,
           "rejects": 1,
           "throwsCount": 0,
@@ -1799,7 +2527,7 @@
         },
         {
           "name": "Failure Scenario 35: Missing, symlink, or corrupt backup receipt/cache during rollback transitions to rollback_failed",
-          "line": 2537,
+          "line": 2542,
           "assertions": 3,
           "rejects": 1,
           "throwsCount": 0,
@@ -1810,7 +2538,7 @@
         },
         {
           "name": "Failure Scenario 36: Committed crash with failed post-commit cleanup leaves journal committed and recovery is idempotent",
-          "line": 2599,
+          "line": 2604,
           "assertions": 10,
           "rejects": 0,
           "throwsCount": 0,
@@ -1821,7 +2549,7 @@
         },
         {
           "name": "Failure Scenario 37: TransactionJournalManager rejects queued writes when terminate() is called concurrently",
-          "line": 2698,
+          "line": 2703,
           "assertions": 3,
           "rejects": 0,
           "throwsCount": 0,
@@ -1832,7 +2560,7 @@
         },
         {
           "name": "Failure Scenario 38: Publication state machine enforces strict staged -> publishing -> published sequence",
-          "line": 2769,
+          "line": 2774,
           "assertions": 5,
           "rejects": 0,
           "throwsCount": 0,
@@ -1843,7 +2571,7 @@
         },
         {
           "name": "Failure Scenario 39: Docker smoke node fails if any artifact binding is missing or empty",
-          "line": 2829,
+          "line": 2834,
           "assertions": 1,
           "rejects": 1,
           "throwsCount": 0,
@@ -1854,7 +2582,7 @@
         },
         {
           "name": "Failure Scenario 40: deepFreeze ensures nested mutations on snapshots cannot tamper with TransactionJournalManager state",
-          "line": 2925,
+          "line": 2930,
           "assertions": 11,
           "rejects": 0,
           "throwsCount": 2,
@@ -1865,7 +2593,7 @@
         },
         {
           "name": "Failure Scenario 41: TransactionJournalManager handles in-flight mutation termination and rejects queued promises",
-          "line": 3010,
+          "line": 3015,
           "assertions": 7,
           "rejects": 0,
           "throwsCount": 0,
@@ -1876,7 +2604,7 @@
         },
         {
           "name": "Failure Scenario 42: Publication state machine forbids restored/deleted outside rollback and forbids mutating published records",
-          "line": 3085,
+          "line": 3090,
           "assertions": 8,
           "rejects": 0,
           "throwsCount": 0,
@@ -1887,7 +2615,7 @@
         },
         {
           "name": "Failure Scenario 43: Committed recovery verifies destination artifact integrity before cleanup and fails closed on tampering",
-          "line": 3178,
+          "line": 3183,
           "assertions": 3,
           "rejects": 1,
           "throwsCount": 0,
@@ -1898,7 +2626,7 @@
         },
         {
           "name": "Failure Scenario 44: Release mode rejects legacy test evidence schema v2 and enforces releaseSameRun",
-          "line": 3263,
+          "line": 3268,
           "assertions": 5,
           "rejects": 0,
           "throwsCount": 0,
@@ -1909,7 +2637,7 @@
         },
         {
           "name": "Failure Scenario 45: Fault injection in rollback atomic journal write raises compound failure",
-          "line": 3318,
+          "line": 3323,
           "assertions": 1,
           "rejects": 1,
           "throwsCount": 0,
@@ -2539,8 +3267,8 @@
     },
     {
       "file": "resolve-content-root.test.mjs",
-      "testCount": 3,
-      "assertions": 3,
+      "testCount": 5,
+      "assertions": 6,
       "rejections": 0,
       "throws": 1,
       "negativeChecks": 1,
@@ -2577,6 +3305,28 @@
           "rejects": 0,
           "throwsCount": 1,
           "negativeBranches": 1,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "resolveContentRoot detects parent when cwd is inside plugins subdir",
+          "line": 54,
+          "assertions": 1,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "resolveContentRoot respects --content-root and --plugins-dir in argv",
+          "line": 69,
+          "assertions": 2,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
           "isSkip": false,
           "isTodo": false,
           "isOnly": false
@@ -2940,8 +3690,8 @@
     },
     {
       "file": "tavangary-core-artifact.test.mjs",
-      "testCount": 4,
-      "assertions": 10,
+      "testCount": 5,
+      "assertions": 20,
       "rejections": 0,
       "throws": 0,
       "negativeChecks": 0,
@@ -2986,6 +3736,17 @@
           "name": "Tavangary Core Artifact: verifies comment stripping and symbol mangling across modules",
           "line": 47,
           "assertions": 2,
+          "rejects": 0,
+          "throwsCount": 0,
+          "negativeBranches": 0,
+          "isSkip": false,
+          "isTodo": false,
+          "isOnly": false
+        },
+        {
+          "name": "Tavangary Core Artifact: strictly orders ZIP entries so autoload targets precede vendor/autoload.php",
+          "line": 53,
+          "assertions": 10,
           "rejects": 0,
           "throwsCount": 0,
           "negativeBranches": 0,

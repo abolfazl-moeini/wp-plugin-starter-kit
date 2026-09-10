@@ -75,7 +75,82 @@ function normalizeStandaloneModuleLoaders(distRoot) {
   assertDuckTypedModuleLoaders(distRoot);
 }
 
-function parseArgs(argv) {
+export const CANONICAL_CONSUMERS = new Set([
+  "tavangary-core",
+  "tavangary-theme-panel",
+  "wpdev-crm",
+  "wpdev-tickets",
+  "wpdev-analytics",
+  "wpdev-woo-persian",
+  "drm-connector",
+]);
+
+export function resolveCanonicalAssembler({
+  fromDir,
+  pluginRoot,
+  env = process.env,
+} = {}) {
+  const explicit = String(env.WPDEV_STANDALONE_ASSEMBLER || "").trim();
+  if (explicit && existsSync(explicit)) {
+    return path.resolve(explicit);
+  }
+
+  const starterKit = String(env.WPDEV_STARTER_KIT || "").trim();
+  const candidates = [];
+  if (starterKit) {
+    candidates.push(
+      path.join(
+        starterKit,
+        "packages/standalone-build/assemble-profile-s-candidate.mjs",
+      ),
+    );
+  }
+
+  if (fromDir) {
+    candidates.push(
+      path.resolve(
+        fromDir,
+        "../../../standalone-build/assemble-profile-s-candidate.mjs",
+      ),
+    );
+    let dir = path.resolve(fromDir);
+    for (let i = 0; i < 10; i += 1) {
+      candidates.push(
+        path.join(
+          dir,
+          "packages/standalone-build/assemble-profile-s-candidate.mjs",
+        ),
+      );
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+
+  if (pluginRoot) {
+    let dir = path.resolve(pluginRoot);
+    for (let i = 0; i < 10; i += 1) {
+      candidates.push(
+        path.join(
+          dir,
+          "wp-starter-kit/packages/standalone-build/assemble-profile-s-candidate.mjs",
+        ),
+        path.join(
+          dir,
+          "packages/standalone-build/assemble-profile-s-candidate.mjs",
+        ),
+      );
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+
+  const found = candidates.find((c) => existsSync(c));
+  return found ? path.resolve(found) : null;
+}
+
+export function parseArgs(argv) {
   const opts = {
     out: "dist",
     skipComposer: false,
@@ -83,31 +158,52 @@ function parseArgs(argv) {
     skipZip: false,
     skipTests: false,
     obfuscate: false,
+    profile: "clean",
     root: process.cwd(),
   };
-  for (const arg of argv) {
+  const selectedProfiles = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
     if (arg === "--skip-composer") opts.skipComposer = true;
     else if (arg === "--skip-rector") opts.skipRector = true;
     else if (arg === "--skip-zip") opts.skipZip = true;
     else if (arg === "--skip-tests") opts.skipTests = true;
-    else if (arg === "--obfuscate" || arg === "--profile=s")
-      opts.obfuscate = true;
-    else if (arg.startsWith("--profile=")) {
-      const value = arg.slice("--profile=".length).trim().toLowerCase();
-      if (value === "s") opts.obfuscate = true;
-      else if (value === "clean") {
-        if (opts.obfuscate) {
-          throw new Error(
-            "Conflicting profile flags: --obfuscate and --profile=clean",
-          );
-        }
-      } else {
-        throw new Error(`Invalid --profile '${value}'. Allowed: s, clean`);
+    else if (arg === "--obfuscate") {
+      selectedProfiles.push("s");
+    } else if (arg === "--profile") {
+      const next = argv[i + 1];
+      if (!next || next.startsWith("--")) {
+        throw new Error("Invalid --profile: a value is required (s or clean)");
       }
-    } else if (arg.startsWith("--out=")) opts.out = arg.slice("--out=".length);
-    else if (arg.startsWith("--root="))
+      const val = next.trim().toLowerCase();
+      if (val !== "s" && val !== "clean") {
+        throw new Error(`Invalid --profile '${val}'. Allowed: s, clean`);
+      }
+      selectedProfiles.push(val);
+      i++;
+    } else if (arg === "--profile=") {
+      throw new Error("Invalid --profile: a value is required (s or clean)");
+    } else if (typeof arg === "string" && arg.startsWith("--profile=")) {
+      const val = arg.slice("--profile=".length).trim().toLowerCase();
+      if (val !== "s" && val !== "clean") {
+        throw new Error(`Invalid --profile '${val}'. Allowed: s, clean`);
+      }
+      selectedProfiles.push(val);
+    } else if (typeof arg === "string" && arg.startsWith("--out=")) {
+      opts.out = arg.slice("--out=".length);
+    } else if (typeof arg === "string" && arg.startsWith("--root=")) {
       opts.root = path.resolve(arg.slice("--root=".length));
-    else if (arg === "--help" || arg === "-h") opts.help = true;
+    } else if (arg === "--help" || arg === "-h") {
+      opts.help = true;
+    }
+  }
+  const unique = [...new Set(selectedProfiles)];
+  if (unique.length > 1) {
+    throw new Error(`Conflicting profile flags: ${unique.join(", ")}`);
+  }
+  if (unique.length === 1) {
+    opts.profile = unique[0];
+    opts.obfuscate = unique[0] === "s";
   }
   return opts;
 }
@@ -412,12 +508,60 @@ export async function prepareRelease(options = {}) {
   const skipRector = Boolean(options.skipRector);
   const skipZip = Boolean(options.skipZip);
   const skipTests = Boolean(options.skipTests);
+  const isObfuscate = Boolean(options.obfuscate || options.profile === "s");
+  const profile = options.profile || (isObfuscate ? "s" : "clean");
 
   // Gate BEFORE wiping dist so a failed suite leaves an existing package intact.
   gateReleaseTests(root, { skipTests });
 
   const { slug, phpMinVersion } = readProjectConfig(root);
   const outAbs = path.join(root, outBase);
+
+  // Check if this consumer can delegate to canonical standalone assembler
+  const canonicalAssemblerPath = resolveCanonicalAssembler({
+    fromDir: getReleaseScriptDir(),
+    pluginRoot: root,
+  });
+
+  const isRegisteredConsumer = CANONICAL_CONSUMERS.has(slug);
+
+  if (
+    isRegisteredConsumer &&
+    canonicalAssemblerPath &&
+    options.useCanonicalAssembler !== false
+  ) {
+    const { assembleProfileSCandidate } = await import(
+      pathToFileURL(canonicalAssemblerPath).href
+    );
+    const pluginsDir = path.dirname(root);
+    const contentRoot = path.dirname(pluginsDir);
+
+    const result = await assembleProfileSCandidate({
+      contentRoot,
+      pluginsDir,
+      sourceRoot: root,
+      consumer: slug,
+      outputDir: outAbs,
+      isObfuscate,
+      profile: isObfuscate ? "s" : "clean",
+      emitDistDir: true,
+      skipZip,
+    });
+
+    const distRoot = path.join(outAbs, slug);
+    const zipPath = skipZip
+      ? null
+      : result.outputProfileSZipPath || path.join(outAbs, `${slug}.zip`);
+    return {
+      distRoot,
+      zipPath,
+      slug,
+      phpMinVersion,
+      manifest: result,
+    };
+  }
+
+  // Generic release workflow for non-registered plugins
   const distRoot = path.join(outAbs, slug);
 
   if (existsSync(distRoot)) {
@@ -427,14 +571,14 @@ export async function prepareRelease(options = {}) {
 
   copyTree(root, distRoot, releaseCopyExcludeNames());
 
-  if (options.obfuscate && skipRector) {
+  if (isObfuscate && skipRector) {
     throw new Error("Profile S cannot combine --obfuscate with --skip-rector");
   }
 
   // Downgrade *before* composer --no-dev and before stripping `dev/`.
   if (!skipRector) {
     runRectorBuildOnDist(root, distRoot, {
-      required: Boolean(options.obfuscate),
+      required: Boolean(isObfuscate),
     });
   }
 
@@ -456,7 +600,7 @@ export async function prepareRelease(options = {}) {
   stripDist(distRoot);
 
   // Opt-in Profile S Obfuscation (off by default; fail closed when requested).
-  if (options.obfuscate) {
+  if (isObfuscate) {
     const toolsTransformer = requireProfileSTransformer({
       fromDir: getReleaseScriptDir(),
       pluginRoot: root,
@@ -488,6 +632,60 @@ export async function prepareRelease(options = {}) {
     parseTransformerBatchLog(batchRes.stdout);
     if (existsSync(mapFile)) {
       rmSync(mapFile, { force: true });
+    }
+
+    // Dump Composer classmap after mangling if vendor exists
+    const vendorDir = path.join(distRoot, "vendor");
+    if (existsSync(vendorDir)) {
+      const tempCompPath = path.join(distRoot, "composer.json");
+      const hadCompJson = existsSync(tempCompPath);
+      let compData = {};
+      if (hadCompJson) {
+        try {
+          compData = JSON.parse(readFileSync(tempCompPath, "utf8"));
+        } catch {}
+      }
+      const candidateDirs = ["src", "includes", "inc", "classes"].filter((d) =>
+        existsSync(path.join(distRoot, d)),
+      );
+      const tempComp = {
+        ...compData,
+        name: compData.name || "release/" + slug,
+        autoload: {
+          ...(compData.autoload || {}),
+          classmap:
+            candidateDirs.length > 0
+              ? candidateDirs.map((d) => d + "/")
+              : ["./"],
+        },
+      };
+      writeFileSync(
+        tempCompPath,
+        JSON.stringify(tempComp, null, 2) + "\n",
+        "utf8",
+      );
+      const dumpRes = spawnSync(
+        "composer",
+        [
+          "dump-autoload",
+          "--no-dev",
+          "--optimize",
+          "--no-scripts",
+          "--no-plugins",
+        ],
+        {
+          cwd: distRoot,
+          stdio: "inherit",
+        },
+      );
+      if (!hadCompJson && existsSync(tempCompPath)) {
+        rmSync(tempCompPath, { force: true });
+      }
+      if (dumpRes.status !== 0) {
+        throw new Error(
+          "composer dump-autoload failed after Profile S transformation",
+        );
+      }
     }
   }
 

@@ -14,15 +14,14 @@ const execFileAsync = promisify(execFile);
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function resolveSmokeContentRoot() {
-  try {
-    return resolveContentRoot({ scriptDir: packageRoot, cwd: process.cwd(), env: process.env });
-  } catch (err) {
-    const fallback = "/Users/moeini/Dev/tavangary.new/wordpress/wp-content";
-    if (fs.existsSync(fallback)) {
-      return fallback;
+  if (process.env.SMOKE_CONTENT_ROOT) {
+    const explicit = path.resolve(process.env.SMOKE_CONTENT_ROOT);
+    if (!fs.existsSync(explicit)) {
+      throw new Error(`Explicit SMOKE_CONTENT_ROOT does not exist: ${explicit}`);
     }
-    throw err;
+    return explicit;
   }
+  return resolveContentRoot({ scriptDir: packageRoot, cwd: process.cwd(), env: process.env });
 }
 
 test("Docker Runtime Smoke: verifies TestRegistry and standalone plugins match deployed receipts", async (t) => {

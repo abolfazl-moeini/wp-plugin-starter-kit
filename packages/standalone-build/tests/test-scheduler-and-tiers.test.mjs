@@ -49,15 +49,15 @@ test("Test Tiers: validateCanonicalTestRegistry validates disjoint tier partitio
   const val = validateCanonicalTestRegistry(testsDir, contentRoot);
   assert.equal(val.valid, true, `Registry must be valid: ${val.reason}`);
   assert.equal(val.tiers.meta, 1);
-  assert.equal(val.tiers.unit, 20);
-  assert.equal(val.tiers.contract, 37);
+  assert.equal(val.tiers.unit, 25);
+  assert.equal(val.tiers.contract, 49);
   assert.equal(val.tiers.integration, 2);
-  assert.equal(val.totalTests, 60);
+  assert.equal(val.totalTests, 77);
 });
 
 test("canonical npm test inventory matches package.json and files on disk", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(toolsDir, "package.json"), "utf8"));
-  assert.equal(pkg.scripts.test, "node --test tests/*.test.mjs tests-docker/*.test.mjs");
+  assert.equal(pkg.scripts.test, "node --test tests/*.test.mjs");
   const testsDir = path.join(toolsDir, "tests");
   const onDisk = fs.readdirSync(testsDir).filter((name) => name.endsWith(".test.mjs")).sort();
   const val = validateCanonicalTestRegistry(testsDir, contentRoot);

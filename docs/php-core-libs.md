@@ -166,7 +166,7 @@ wired from `Module::boot()`.
 
 ## Auth (`WPDev\Support\Auth\CapabilityPolicy`)
 
-Thin wrappers around `current_user_can()` and AccessManager named rules.
+Thin wrappers around `current_user_can()` and AccessManager named rules, supporting the **Two-Gate Defense-in-Depth Model**:
 
 ```php
 public static function can(string $capability): bool;
@@ -175,11 +175,16 @@ public static function access(UserAccess $qualifier, string $accessId): bool;
 public static function rest_access(UserAccess $qualifier, string $accessId): callable;
 ```
 
-**Security:** Always use the narrowest capability. `read` is granted to
-every logged-in user — avoid it for mutating endpoints.
+### Two-Gate Defense-in-Depth Model
 
-**Prefer AccessManager** for multi-rule feature gates (see below). Use
-`can()` / `rest_permission()` only for one-off single-cap checks.
+Securing sensitive operations (REST routes, AJAX handlers, admin mutations) requires two layers of defense:
+
+1. **Gate 1 (Native WordPress Capability):** Verifies role-based capability boundaries (e.g. `edit_posts`, `manage_options`) using `current_user_can()` or `CapabilityPolicy::can()`.
+2. **Gate 2 (AccessManager Domain Policy):** Verifies declarative domain business logic and contextual access rules via `CapabilityPolicy::access()` or `UserAccess::have_access()`.
+
+**Security Best Practice:** Always use the narrowest capability. Avoid `read` for mutating endpoints. On privileged endpoints, combine Gate 1 (role capability) and Gate 2 (domain policy) so that neither coarse role grants nor policy misconfigurations alone can bypass authorization.
+
+**Prefer AccessManager** for multi-rule feature gates (see below). Use `can()` / `rest_permission()` only for one-off single-cap checks.
 
 **Example (single cap):**
 
@@ -200,7 +205,7 @@ return CapabilityPolicy::access(new FeatureAccess(), FeatureAccess::EDIT_ITEMS);
 
 ## AccessManager (`WPDev\Support\AccessManager\`)
 
-Declarative named access rules. Ported from `betterstudio/access-manager`.
+Declarative named access rules for domain authorization (Gate 2).
 
 | Class                 | Role                                         |
 | --------------------- | -------------------------------------------- |
@@ -208,7 +213,13 @@ Declarative named access rules. Ported from `betterstudio/access-manager`.
 | `QualifierBase`       | `have_access($id)` — OR of rule groups       |
 | `BluePrint\BluePrint` | Fluent `describe` / `any` / `all` / `custom` |
 
-**Semantics:**
+### Architecture & WPDev Framework Relationship
+
+- **In the Starter Kit:** `WPDev\Support\AccessManager\` provides the standalone consumer DSL (`UserAccess`, `BluePrint`) for feature modules.
+- **In the WPDev Core Framework:** The canonical access engine lives in `packages/access-manager/` (namespace `WPDev\Access\`), integrated with `WPDevFramework\Core\Access\Permission_Registry`, `Access_Policy_Registry`, and public facades `wpdev_can()`, `wpdev_require_access()`, and `wpdev_register_permission()`.
+- Modules running under the WPDev framework can register domain permissions into the catalog via `wpdev_register_permission()` on `wpdev_load`, allowing cross-module introspection and centralized auditing.
+
+### Semantics
 
 - Multiple `describe('same-id')` calls create **OR** groups.
 - Rules inside one group (`any`/`all`/`custom` chains) are **AND**'d.

@@ -90,9 +90,7 @@ test("Minifier: writes SCRIPT_DEBUG=.min siblings next to unminified FrameworkCl
   await writeFile(path.join(assetsDir, "functions-core.js"), "function wpdev_on_load(){return true;}");
   await writeFile(path.join(assetsDir, "functions-utils.js"), "function wpdev_noop(){return 1;}");
 
-  const contentRoot =
-    process.env.WPDEV_CONTENT_ROOT ||
-    "/Users/moeini/Dev/tavangary.new/wordpress/wp-content";
+  const contentRoot = path.resolve(fileURLToPath(new URL("../../../..", import.meta.url)));
   try {
     const result = await minifyAssetsInTree(tmpDir, contentRoot);
     assert.ok(result.minSiblingsWritten >= 2, "Must emit .min.js siblings for unminified JS");

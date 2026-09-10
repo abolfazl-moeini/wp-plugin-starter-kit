@@ -185,7 +185,7 @@ test("Cache engine: ZIP reuse requires matching SHA-256; missing or same-size ta
     await writeFile(zipPath, original);
     const sha = crypto.createHash("sha256").update(original).digest("hex");
 
-    assert.equal(CACHE_SCHEMA_VERSION, 2, "cache schema must be version 2 with artifact hashes");
+    assert.equal(CACHE_SCHEMA_VERSION, 3, "cache schema must be version 3 with canonical nested option hashing");
     assert.equal(await canReuseCachedZip({ zipPath, expectedSha256: sha }), true);
 
     const tampered = Buffer.from(original);

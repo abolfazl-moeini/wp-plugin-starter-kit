@@ -133,11 +133,12 @@ final class ItemsController extends RestHandler
 
     public function rest_permission(): bool
     {
-        // Prefer AccessManager named rules (see Access/FeatureAccess.php).
-        return CapabilityPolicy::access(
-            new FeatureAccess(),
-            FeatureAccess::EDIT_ITEMS
-        );
+        // Enforce Two-Gate Defense: Gate 1 (WP cap) + Gate 2 (AccessManager domain policy).
+        return CapabilityPolicy::can('edit_posts')
+            && CapabilityPolicy::access(
+                new FeatureAccess(),
+                FeatureAccess::EDIT_ITEMS
+            );
     }
 
     public function rest_end_point(): string { return 'my-items'; }
@@ -207,7 +208,7 @@ wpdev doctor .       # drift check on the project
 
 Every module must follow WordPress security practices:
 
-- [ ] REST routes implement `permission_callback` (prefer AccessManager `UserAccess` + `CapabilityPolicy::access()`)
+- [ ] REST routes implement `permission_callback` enforcing Two-Gate Defense (Gate 1 WP capability + Gate 2 AccessManager `UserAccess` via `CapabilityPolicy::access()` / `wpdev_can()`)
 - [ ] Input sanitized (`sanitize_text_field`, `absint`, etc.)
 - [ ] Output escaped (`esc_html`, `esc_attr`, `wp_kses_post`)
 - [ ] AJAX handlers verify nonces

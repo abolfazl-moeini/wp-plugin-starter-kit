@@ -13,7 +13,7 @@ import * as path from "node:path";
 import { prepareRelease } from "./prepare-release.js";
 import { gateReleaseTests } from "./releaseTests.js";
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const opts = {
     out: "dist",
     skipComposer: false,
@@ -22,20 +22,53 @@ function parseArgs(argv) {
     skipTests: false,
     candidate: false,
     obfuscate: false,
+    profile: "clean",
     root: process.cwd(),
   };
-  for (const arg of argv) {
+  const selectedProfiles = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
     if (arg === "--skip-composer") opts.skipComposer = true;
     else if (arg === "--skip-rector") opts.skipRector = true;
     else if (arg === "--skip-zip") opts.skipZip = true;
     else if (arg === "--skip-tests") opts.skipTests = true;
     else if (arg === "--candidate") opts.candidate = true;
-    else if (arg === "--obfuscate" || arg === "--profile=s")
-      opts.obfuscate = true;
-    else if (arg.startsWith("--out=")) opts.out = arg.slice("--out=".length);
-    else if (arg.startsWith("--root="))
+    else if (arg === "--obfuscate") {
+      selectedProfiles.push("s");
+    } else if (arg === "--profile") {
+      const next = argv[i + 1];
+      if (!next || next.startsWith("--")) {
+        throw new Error("Invalid --profile: a value is required (s or clean)");
+      }
+      const val = next.trim().toLowerCase();
+      if (val !== "s" && val !== "clean") {
+        throw new Error(`Invalid --profile '${val}'. Allowed: s, clean`);
+      }
+      selectedProfiles.push(val);
+      i++;
+    } else if (arg === "--profile=") {
+      throw new Error("Invalid --profile: a value is required (s or clean)");
+    } else if (typeof arg === "string" && arg.startsWith("--profile=")) {
+      const val = arg.slice("--profile=".length).trim().toLowerCase();
+      if (val !== "s" && val !== "clean") {
+        throw new Error(`Invalid --profile '${val}'. Allowed: s, clean`);
+      }
+      selectedProfiles.push(val);
+    } else if (typeof arg === "string" && arg.startsWith("--out=")) {
+      opts.out = arg.slice("--out=".length);
+    } else if (typeof arg === "string" && arg.startsWith("--root=")) {
       opts.root = path.resolve(arg.slice("--root=".length));
-    else if (arg === "--help" || arg === "-h") opts.help = true;
+    } else if (arg === "--help" || arg === "-h") {
+      opts.help = true;
+    }
+  }
+  const unique = [...new Set(selectedProfiles)];
+  if (unique.length > 1) {
+    throw new Error(`Conflicting profile flags: ${unique.join(", ")}`);
+  }
+  if (unique.length === 1) {
+    opts.profile = unique[0];
+    opts.obfuscate = unique[0] === "s";
   }
   return opts;
 }
@@ -152,4 +185,4 @@ if (isDirect) {
   });
 }
 
-export { createCandidateReport, parseArgs, runNpmBuild };
+export { createCandidateReport, runNpmBuild };

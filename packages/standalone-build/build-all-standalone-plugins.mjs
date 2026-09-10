@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   ALLOWED_CONSUMERS,
+  isValidConsumerName,
   CACHE_SCHEMA_VERSION,
   DEPLOY_JOURNAL_SCHEMA_VERSION,
   computeAllFingerprintsParallel,
@@ -45,6 +46,7 @@ import {
 } from "./build-cache-engine.mjs";
 
 import {
+  collectComposerAutoloadFileTargets,
   readEmbeddedManifestFromZip,
   readZipEntries,
   verifyArtifactManifest,
@@ -60,6 +62,7 @@ import { TARGET_REGISTRY, listStandaloneConsumers } from "./target-registry.mjs"
 import { resolveContentRoot } from "./resolve-content-root.mjs";
 import { parseClosedProfileFlags } from "./profile-s-fail-closed.mjs";
 import { assembleProfileSCandidate } from "./assemble-profile-s-candidate.mjs";
+import { createBuildPlan, resolveArtifactZipName } from "./build-plan.mjs";
 
 const execFileAsync = promisify(execFile);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -75,11 +78,14 @@ function getContentRoot() {
     throw err;
   }
 }
-const contentRoot = getContentRoot();
-const distDir = path.join(contentRoot, "dist");
-const pluginsDir = path.join(contentRoot, "plugins");
-const cacheFile = path.join(distDir, ".build-cache.json");
-const receiptsDir = path.join(distDir, ".deploy-receipts");
+
+let cachedContentRoot;
+function defaultContentRoot() {
+  if (cachedContentRoot === undefined) {
+    cachedContentRoot = getContentRoot();
+  }
+  return cachedContentRoot;
+}
 
 export const MAX_JOBS_LIMIT = Math.max(1, Math.min(8, os.cpus().length || 4));
 
@@ -180,9 +186,10 @@ export async function runSelectedNodeTests({
   jobsLimit = 4,
   signal = null,
   executor = null,
-  cwd = contentRoot,
+  cwd = null,
   scriptDir: customScriptDir = scriptDir,
-}) {
+} = {}) {
+  const resolvedCwd = cwd || defaultContentRoot();
   if (!Array.isArray(testFiles)) {
     throw new Error("runSelectedNodeTests: testFiles must be an array");
   }
@@ -244,7 +251,7 @@ export async function runSelectedNodeTests({
 
   const startTime = Date.now();
   if (executor) {
-    const execOptions = { cwd };
+    const execOptions = { cwd: resolvedCwd };
     if (signal) execOptions.signal = signal;
     const testRes = await executor(process.execPath, testArgs, execOptions);
     const durationMs = Date.now() - startTime;
@@ -286,7 +293,7 @@ export async function runSelectedNodeTests({
     };
 
     const child = spawn(process.execPath, testArgs, {
-      cwd,
+      cwd: resolvedCwd,
       signal,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -347,9 +354,149 @@ export async function runSelectedNodeTests({
   });
 }
 
+export function canonicalizePath(targetPath) {
+  if (!targetPath) return targetPath;
+  const resolved = path.resolve(targetPath);
+  try {
+    return fs.realpathSync(resolved);
+  } catch {
+    const segments = [];
+    let curr = resolved;
+    while (curr !== path.dirname(curr)) {
+      if (fs.existsSync(curr)) {
+        try {
+          const realParent = fs.realpathSync(curr);
+          return path.join(realParent, ...segments);
+        } catch {
+          break;
+        }
+      }
+      segments.unshift(path.basename(curr));
+      curr = path.dirname(curr);
+    }
+    return resolved;
+  }
+}
+
+export async function acquireInterProcessLock({
+  lockFile,
+  resourceName = path.basename(lockFile),
+  signal = null,
+  timeoutMs = 0,
+  pollIntervalMs = 50,
+}) {
+  const canonDir = canonicalizePath(path.dirname(lockFile));
+  const canonLockFile = path.join(canonDir, path.basename(lockFile));
+  await fs.promises.mkdir(canonDir, { recursive: true });
+
+  const lockToken = crypto.randomUUID();
+  const lockPayload = JSON.stringify({
+    pid: process.pid,
+    host: os.hostname(),
+    token: lockToken,
+    time: Date.now(),
+  });
+
+  const startTime = Date.now();
+
+  while (true) {
+    if (signal?.aborted) {
+      throw new Error(`Lock acquisition aborted for ${resourceName}`);
+    }
+
+    try {
+      const handle = await fs.promises.open(canonLockFile, "wx");
+      await handle.writeFile(lockPayload, "utf8");
+      await handle.close();
+
+      let released = false;
+      return {
+        lockFile: canonLockFile,
+        token: lockToken,
+        release: async () => {
+          if (released) return;
+          released = true;
+          try {
+            const cur = JSON.parse(await fs.promises.readFile(canonLockFile, "utf8"));
+            if (cur.token === lockToken) {
+              await fs.promises.rm(canonLockFile, { force: true });
+            }
+          } catch {
+            // Never remove a lock whose ownership can no longer be proven
+          }
+        },
+      };
+    } catch (err) {
+      if (err.code !== "EEXIST") {
+        throw err;
+      }
+
+      let reclaim = false;
+      try {
+        const lockData = JSON.parse(await fs.promises.readFile(canonLockFile, "utf8"));
+        if (!Number.isSafeInteger(lockData.pid) || typeof lockData.host !== "string") {
+          throw new Error("deployment lock has invalid ownership metadata");
+        }
+        if (lockData.host === os.hostname()) {
+          try {
+            process.kill(lockData.pid, 0);
+          } catch (killErr) {
+            if (killErr.code === "ESRCH") {
+              reclaim = true;
+            }
+          }
+        }
+      } catch (lockError) {
+        throw new Error(`Deployment lock for ${resourceName} cannot be safely validated: ${lockError.message}`);
+      }
+
+      if (reclaim) {
+        const reclaimPath = `${canonLockFile}.reclaim-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        try {
+          await fs.promises.rename(canonLockFile, reclaimPath);
+          await fs.promises.rm(reclaimPath, { force: true }).catch(() => {});
+          continue;
+        } catch {
+          // Reclaim race lost to another concurrent process
+        }
+      }
+
+      if (timeoutMs > 0 && Date.now() - startTime < timeoutMs) {
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+        continue;
+      }
+
+      throw new Error(`Deployment lock active for ${resourceName} (concurrent deploy detected)`);
+    }
+  }
+}
+
 export async function atomicDeployPlugin(profileSZip, pluginName, options = {}) {
-  const resolvedPluginsDir = options.pluginsDir || pluginsDir;
-  const resolvedContentRoot = options.contentRoot || contentRoot;
+  if (typeof pluginName !== "string" || !/^[a-z0-9_-]+$/i.test(pluginName) || pluginName.includes("/") || pluginName.includes("\\") || pluginName === "." || pluginName === "..") {
+    throw new Error(`Invalid plugin slug '${pluginName}': must be a single safe path segment`);
+  }
+  if (options.stagingToken && (options.stagingToken.includes("/") || options.stagingToken.includes("\\") || options.stagingToken.includes("..") || options.stagingToken === "." || options.stagingToken.trim() === "")) {
+    throw new Error(`Invalid staging token '${options.stagingToken}': must not escape plugins directory`);
+  }
+  if (options.backupToken && (options.backupToken.includes("/") || options.backupToken.includes("\\") || options.backupToken.includes("..") || options.backupToken === "." || options.backupToken.trim() === "")) {
+    throw new Error(`Invalid backup token '${options.backupToken}': must not escape plugins directory`);
+  }
+  if (options.bootstrapFile && (path.isAbsolute(options.bootstrapFile) || options.bootstrapFile.includes("..") || options.bootstrapFile.includes("\\") || options.bootstrapFile.includes("\0") || /^[a-zA-Z]:/.test(options.bootstrapFile))) {
+    throw new Error(`Invalid bootstrap path '${options.bootstrapFile}': must be relative within target root`);
+  }
+
+  const resolvedContentRoot = canonicalizePath(
+    options.contentRoot
+      ? path.resolve(options.contentRoot)
+      : options.pluginsDir
+        ? path.dirname(path.resolve(options.pluginsDir))
+        : defaultContentRoot()
+  );
+  const resolvedPluginsDir = canonicalizePath(
+    options.pluginsDir
+      ? path.resolve(options.pluginsDir)
+      : path.join(resolvedContentRoot, "plugins")
+  );
   const targetDir = path.join(resolvedPluginsDir, pluginName);
   const tempExtractDir = path.join(
     resolvedPluginsDir,
@@ -359,57 +506,20 @@ export async function atomicDeployPlugin(profileSZip, pluginName, options = {}) 
     resolvedPluginsDir,
     options.backupToken || `.${pluginName}.backup-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   );
-  const lockFile = path.join(resolvedPluginsDir, `.${pluginName}.deploy.lock`);
-  const lockToken = crypto.randomUUID();
-  const lockPayload = () => JSON.stringify({
-    pid: process.pid,
-    host: os.hostname(),
-    token: lockToken,
-    time: Date.now(),
-  });
 
-  // 1. Acquire deployment lock with PID liveness check
-  let lockAcquired = false;
-  try {
-    const handle = await fs.promises.open(lockFile, "wx");
-    await handle.writeFile(lockPayload(), "utf8");
-    await handle.close();
-    lockAcquired = true;
-  } catch (err) {
-    if (err.code === "EEXIST") {
-      let reclaim = false;
-      try {
-        const lockData = JSON.parse(await fs.promises.readFile(lockFile, "utf8"));
-        if (!Number.isSafeInteger(lockData.pid) || typeof lockData.host !== "string") {
-          throw new Error("deployment lock has invalid ownership metadata");
-        }
-        if (lockData.host === os.hostname()) {
-          try {
-            process.kill(lockData.pid, 0);
-          } catch {
-            reclaim = true;
-          }
-        }
-      } catch (lockError) {
-        throw new Error(`Deployment lock for ${pluginName} cannot be safely validated: ${lockError.message}`);
-      }
-
-      if (reclaim) {
-        await fs.promises.rm(lockFile, { force: true });
-        const h2 = await fs.promises.open(lockFile, "wx");
-        await h2.writeFile(lockPayload(), "utf8");
-        await h2.close();
-        lockAcquired = true;
-      } else {
-        throw new Error(`Deployment lock active for ${pluginName} (concurrent deploy detected)`);
-      }
-    } else {
-      throw err;
-    }
+  let deployLock = null;
+  if (!options.skipPluginLock && !options.parentLockToken) {
+    const lockFile = path.join(resolvedPluginsDir, `.${pluginName}.deploy.lock`);
+    deployLock = await acquireInterProcessLock({
+      lockFile,
+      resourceName: pluginName,
+      signal: options.signal,
+    });
   }
 
   let swapDone = false;
   let backupExists = false;
+  let txPhase = "staged";
 
   try {
     if (fs.existsSync(targetDir)) {
@@ -417,7 +527,16 @@ export async function atomicDeployPlugin(profileSZip, pluginName, options = {}) 
     }
 
     // 2. Preflight binary check on ZIP
+    const zipStat = await fs.promises.lstat(profileSZip);
+    if (zipStat.isSymbolicLink() || !zipStat.isFile()) {
+      throw new Error(`Deploy input '${profileSZip}' must be a regular file, not a symlink or directory`);
+    }
+
     const zipBytes = await fs.promises.readFile(profileSZip);
+    const computedZipSha = crypto.createHash("sha256").update(zipBytes).digest("hex");
+    if (options.expectedZipSha && computedZipSha !== options.expectedZipSha) {
+      throw new Error(`Deploy input ZIP digest mismatch (expected ${options.expectedZipSha}, got ${computedZipSha})`);
+    }
     const entries = readZipEntries(zipBytes);
 
     // 3. Strict single root requirement
@@ -429,10 +548,21 @@ export async function atomicDeployPlugin(profileSZip, pluginName, options = {}) 
     }
 
     await fs.promises.mkdir(tempExtractDir, { recursive: true });
-    await execFileAsync("unzip", ["-q", profileSZip, "-d", tempExtractDir], {
-      cwd: resolvedContentRoot,
-      signal: options.signal,
-    });
+    const snapshotZipPath = path.join(tempExtractDir, `.snapshot-${Date.now()}.zip`);
+    await fs.promises.writeFile(snapshotZipPath, zipBytes, { flag: "wx", mode: 0o400 });
+
+    if (typeof options.onPreflightComplete === "function") {
+      await options.onPreflightComplete();
+    }
+
+    try {
+      await execFileAsync("unzip", ["-q", snapshotZipPath, "-d", tempExtractDir], {
+        cwd: resolvedContentRoot,
+        signal: options.signal,
+      });
+    } finally {
+      await fs.promises.rm(snapshotZipPath, { force: true }).catch(() => {});
+    }
 
     const extractedPluginDir = path.join(tempExtractDir, pluginName);
     if (!fs.existsSync(extractedPluginDir)) {
@@ -452,10 +582,76 @@ export async function atomicDeployPlugin(profileSZip, pluginName, options = {}) 
     if (!fs.existsSync(candidateBootstrap)) {
       throw new Error(`Atomic deploy aborted: candidate bootstrap '${bootstrapRelPath}' is missing`);
     }
+    const candidateBootstrapStat = await fs.promises.lstat(candidateBootstrap);
+    if (candidateBootstrapStat.isSymbolicLink() || !candidateBootstrapStat.isFile() || candidateBootstrapStat.size === 0) {
+      throw new Error(`Atomic deploy aborted: candidate bootstrap '${bootstrapRelPath}' is empty or not a regular file`);
+    }
     await execFileAsync("php", ["-l", candidateBootstrap], {
       cwd: extractedPluginDir,
       signal: options.signal,
     });
+
+    // Mandatory Framework Closure preflight: registered framework consumers, or
+    // any candidate that already has a FrameworkClosure tree, must ship the file.
+    const candidateClosure = path.join(extractedPluginDir, "src/FrameworkClosure/functions-closure.php");
+    const candidateClosureDir = path.join(extractedPluginDir, "src/FrameworkClosure");
+    const requiresFrameworkClosure = Boolean(targetMeta?.sharedFramework) || fs.existsSync(candidateClosureDir);
+    if (requiresFrameworkClosure) {
+      if (!fs.existsSync(candidateClosure)) {
+        throw new Error("Atomic deploy aborted: candidate FrameworkClosure/functions-closure.php is missing");
+      }
+      const closureStat = await fs.promises.lstat(candidateClosure);
+      if (closureStat.isSymbolicLink() || !closureStat.isFile() || closureStat.size === 0) {
+        throw new Error("Atomic deploy aborted: candidate FrameworkClosure/functions-closure.php is empty or not a regular file");
+      }
+      await execFileAsync("php", ["-l", candidateClosure], {
+        cwd: extractedPluginDir,
+        signal: options.signal,
+      });
+    }
+
+    // Mandatory Composer Autoloader targets preflight verification
+    const candidateVendorAutoload = path.join(extractedPluginDir, "vendor/autoload.php");
+    if (fs.existsSync(candidateVendorAutoload)) {
+      const vendorStat = await fs.promises.lstat(candidateVendorAutoload);
+      if (vendorStat.isSymbolicLink() || !vendorStat.isFile() || vendorStat.size === 0) {
+        throw new Error("Atomic deploy aborted: vendor/autoload.php is empty or not a regular file");
+      }
+      const candidateAutoloadReal = path.join(extractedPluginDir, "vendor/composer/autoload_real.php");
+      if (!fs.existsSync(candidateAutoloadReal)) {
+        throw new Error("Atomic deploy aborted: vendor/composer/autoload_real.php is missing");
+      }
+      const realStat = await fs.promises.lstat(candidateAutoloadReal);
+      if (realStat.isSymbolicLink() || !realStat.isFile() || realStat.size === 0) {
+        throw new Error("Atomic deploy aborted: vendor/composer/autoload_real.php is empty or not a regular file");
+      }
+      await execFileAsync("php", ["-l", candidateVendorAutoload], {
+        cwd: extractedPluginDir,
+        signal: options.signal,
+      });
+      await execFileAsync("php", ["-l", candidateAutoloadReal], {
+        cwd: extractedPluginDir,
+        signal: options.signal,
+      });
+
+      const candidateAutoloadTargets = await collectComposerAutoloadFileTargets(extractedPluginDir);
+      for (const relTarget of candidateAutoloadTargets) {
+        const absTarget = path.join(extractedPluginDir, relTarget);
+        if (!fs.existsSync(absTarget)) {
+          throw new Error(`Atomic deploy aborted: mandatory autoload target '${relTarget}' is missing from candidate`);
+        }
+        const tgtStat = await fs.promises.lstat(absTarget);
+        if (tgtStat.isSymbolicLink() || !tgtStat.isFile() || tgtStat.size === 0) {
+          throw new Error(`Atomic deploy aborted: mandatory autoload target '${relTarget}' is empty or not a regular file`);
+        }
+        if (relTarget.endsWith(".php")) {
+          await execFileAsync("php", ["-l", absTarget], {
+            cwd: extractedPluginDir,
+            signal: options.signal,
+          });
+        }
+      }
+    }
 
     // 5. Atomic swap
     if (fs.existsSync(targetDir)) {
@@ -463,8 +659,15 @@ export async function atomicDeployPlugin(profileSZip, pluginName, options = {}) 
         await options.onPhaseChange("backup_rename_intent");
       }
       await rename(targetDir, backupDir);
-      await fsyncDir(resolvedPluginsDir);
       backupExists = true;
+      txPhase = "backup_renamed";
+      if (options.injectFault === "after_backup_rename") {
+        throw new Error("Fault injected immediately after target backup rename");
+      }
+      await fsyncDir(resolvedPluginsDir);
+      if (options.injectFault === "after_backup_rename_fsync") {
+        throw new Error("Fault injected during/after backup fsync");
+      }
       if (typeof options.onPhaseChange === "function") {
         await options.onPhaseChange("backup_renamed");
       }
@@ -473,8 +676,15 @@ export async function atomicDeployPlugin(profileSZip, pluginName, options = {}) 
       await options.onPhaseChange("candidate_swap_intent");
     }
     await rename(extractedPluginDir, targetDir);
-    await fsyncDir(resolvedPluginsDir);
     swapDone = true;
+    txPhase = "candidate_swapped";
+    if (options.injectFault === "after_candidate_swap") {
+      throw new Error("Fault injected immediately after candidate swap");
+    }
+    await fsyncDir(resolvedPluginsDir);
+    if (options.injectFault === "after_candidate_swap_fsync") {
+      throw new Error("Fault injected during/after candidate swap fsync");
+    }
     if (typeof options.onPhaseChange === "function") {
       await options.onPhaseChange("candidate_swapped");
     }
@@ -488,8 +698,15 @@ export async function atomicDeployPlugin(profileSZip, pluginName, options = {}) 
       throw new Error(`Post-swap verification failed: main plugin bootstrap '${bootstrapRelPath}' is missing`);
     }
     const bootstrapStat = await fs.promises.lstat(deployedBootstrap);
-    if (bootstrapStat.isSymbolicLink() || !bootstrapStat.isFile()) {
-      throw new Error("Post-swap verification failed: main plugin bootstrap is not a regular file");
+    if (bootstrapStat.isSymbolicLink() || !bootstrapStat.isFile() || bootstrapStat.size === 0) {
+      throw new Error("Post-swap verification failed: main plugin bootstrap is empty or not a regular file");
+    }
+
+    if (requiresFrameworkClosure) {
+      const deployedClosure = path.join(targetDir, "src/FrameworkClosure/functions-closure.php");
+      if (!fs.existsSync(deployedClosure)) {
+        throw new Error("Post-swap verification failed: FrameworkClosure/functions-closure.php is missing");
+      }
     }
 
     if (typeof options.healthCheck === "function") {
@@ -500,14 +717,39 @@ export async function atomicDeployPlugin(profileSZip, pluginName, options = {}) 
       throw new Error(`Post-swap verification failed: deployed tree integrity is ${postSwapReport.status}`);
     }
 
+    // Attempt best-effort OPcache reset if supported
+    try {
+      await execFileAsync("php", ["-r", "if (function_exists('opcache_reset')) { opcache_reset(); }"], {
+        cwd: targetDir,
+        signal: options.signal,
+      });
+    } catch {
+      // Non-fatal if CLI PHP SAPI does not expose opcache_reset
+    }
+
     if (typeof options.onPhaseChange === "function") {
       await options.onPhaseChange("target_verified");
     }
 
+    // Mark committed before touching backup!
+    txPhase = "committed";
+
     // 7. Cleanup backup only upon 100% verified success (unless preserved for transactional orchestration)
     if (backupExists && !options.preserveBackup) {
-      await rm(backupDir, { recursive: true, force: true });
-      backupExists = false;
+      txPhase = "purging_backup";
+      if (options.injectFault === "during_backup_purge") {
+        throw new Error("Fault injected during backup directory purge");
+      }
+      try {
+        await rm(backupDir, { recursive: true, force: true });
+        backupExists = false;
+        await fsyncDir(resolvedPluginsDir);
+      } catch (cleanupErr) {
+        console.warn(`WARNING: Post-commit backup cleanup failed for ${pluginName} at ${backupDir}: ${cleanupErr.message}`);
+        if (options.strictCleanup || options.injectFault === "during_backup_purge") {
+          throw cleanupErr;
+        }
+      }
     }
 
     return {
@@ -516,44 +758,70 @@ export async function atomicDeployPlugin(profileSZip, pluginName, options = {}) 
       stagingDir: tempExtractDir,
     };
   } catch (err) {
+    if (txPhase === "committed" || txPhase === "purging_backup") {
+      // Target directory has reached commit and is verified healthy.
+      // Never roll back or replace target with an incomplete backup!
+      throw err;
+    }
+
+    let rollbackFailure = null;
     if (swapDone && backupExists) {
       try {
+        if (options.injectFault === "during_rollback_rm") {
+          throw new Error("Fault injected during rollback rm");
+        }
         await rm(targetDir, { recursive: true, force: true });
+        if (options.injectFault === "during_rollback_rename") {
+          throw new Error("Fault injected during rollback rename");
+        }
         await rename(backupDir, targetDir);
+        await fsyncDir(resolvedPluginsDir);
         backupExists = false;
+        swapDone = false;
+        txPhase = "rolled_back";
       } catch (rollbackErr) {
+        txPhase = "rollback_failed";
+        rollbackFailure = rollbackErr;
         console.error(`EMERGENCY: Rollback failed for ${pluginName}! Backup preserved at ${backupDir}: ${rollbackErr.message}`);
       }
     } else if (backupExists && !fs.existsSync(targetDir)) {
       try {
+        if (options.injectFault === "during_restore_rename") {
+          throw new Error("Fault injected during restore rename");
+        }
         await rename(backupDir, targetDir);
+        await fsyncDir(resolvedPluginsDir);
         backupExists = false;
+        txPhase = "restored";
       } catch (restoreErr) {
+        txPhase = "rollback_failed";
+        rollbackFailure = restoreErr;
         console.error(`EMERGENCY: Failed restoring backup for ${pluginName} from ${backupDir}: ${restoreErr.message}`);
       }
     } else if (swapDone && !backupExists) {
       // If candidate was swapped in on non-preexisting target, remove target
       try {
         await rm(targetDir, { recursive: true, force: true });
+        await fsyncDir(resolvedPluginsDir);
+        swapDone = false;
+        txPhase = "cleaned_up";
       } catch (cleanupErr) {
         console.warn(`WARNING: Failed cleaning up non-preexisting target ${targetDir}: ${cleanupErr.message}`);
       }
     }
+
+    if (rollbackFailure) {
+      const compositeErr = new Error(`Rollback failed for ${pluginName} (original error: ${err.message}): ${rollbackFailure.message}`);
+      compositeErr.originalError = err;
+      compositeErr.rollbackError = rollbackFailure;
+      throw compositeErr;
+    }
     throw err;
   } finally {
     await rm(tempExtractDir, { recursive: true, force: true }).catch(() => {});
-    if (!backupExists && !options.preserveBackup) {
-      await rm(backupDir, { recursive: true, force: true }).catch(() => {});
-    }
-    if (lockAcquired) {
-      try {
-        const currentLock = JSON.parse(await fs.promises.readFile(lockFile, "utf8"));
-        if (currentLock.token === lockToken) {
-          await rm(lockFile, { force: true });
-        }
-      } catch {
-        // Never remove a lock whose ownership can no longer be proven.
-      }
+
+    if (deployLock) {
+      await deployLock.release().catch(() => {});
     }
   }
 }
@@ -578,7 +846,8 @@ export function parsePipelineArgs(argv = process.argv) {
   const isForce = argv.includes("--force");
   const isChanged = argv.includes("--changed");
   const isWatch = argv.includes("--watch");
-  const { profile, isObfuscate } = parseClosedProfileFlags(argv);
+  const closedFlags = parseClosedProfileFlags(argv);
+  const { profile, isObfuscate } = closedFlags;
 
   const jobsArg = argv.find((a) => a.startsWith("--jobs="));
   const jobsLimit = jobsArg ? parseInt(jobsArg.split("=")[1], 10) : Math.max(1, Math.min(4, os.cpus().length));
@@ -632,6 +901,12 @@ export function parsePipelineArgs(argv = process.argv) {
     isWatch,
     isObfuscate,
     profile,
+    inlineFramework: closedFlags.inlineFramework,
+    spaghetti: closedFlags.spaghetti,
+    obfuscate: closedFlags.obfuscate,
+    minifyAssets: closedFlags.minifyAssets,
+    skipZip: closedFlags.skipZip,
+    targetPhp: closedFlags.targetPhp,
     jobsLimit,
     suite,
     testMode,
@@ -662,11 +937,11 @@ export async function assertDeployTargetSafe(targetDir) {
 }
 
 export async function runPipelineOrchestration(options = {}) {
-  const customContentRoot = options.contentRoot || contentRoot;
+  const customContentRoot = canonicalizePath(options.contentRoot || defaultContentRoot());
   const customScriptDir = options.scriptDir || scriptDir;
-  const customDistDir = options.distDir || path.join(customContentRoot, "dist");
-  const customPluginsDir = options.pluginsDir || path.join(customContentRoot, "plugins");
-  const customReceiptsDir = options.receiptsDir || path.join(customDistDir, ".deploy-receipts");
+  const customDistDir = canonicalizePath(options.distDir || path.join(customContentRoot, "dist"));
+  const customPluginsDir = canonicalizePath(options.pluginsDir || path.join(customContentRoot, "plugins"));
+  const customReceiptsDir = canonicalizePath(options.receiptsDir || path.join(customDistDir, ".deploy-receipts"));
   const customCacheFile = options.cacheFile || path.join(customDistDir, ".build-cache.json");
   const targetPlugins = options.targetPlugins || (options.parsed?.targetPlugins) || TARGET_PLUGINS;
   const activeIsChanged = options.overrideChanged !== undefined ? options.overrideChanged : Boolean(options.isChanged);
@@ -686,15 +961,33 @@ export async function runPipelineOrchestration(options = {}) {
   await fs.promises.mkdir(customDistDir, { recursive: true });
   await fs.promises.mkdir(customReceiptsDir, { recursive: true });
 
+  const pipelineLockFile = path.join(customDistDir, ".transaction.deploy.lock");
+  const pipelineLock = await acquireInterProcessLock({
+    lockFile: pipelineLockFile,
+    resourceName: `pipeline-transaction-${path.basename(customDistDir)}`,
+  });
+
   const journalFile = path.join(customDistDir, ".deploy-journal.json");
 
-  // 1. Startup Recovery: Inspect and safely recover any interrupted deployment BEFORE reading cache
-  await recoverInterruptedDeployment({
-    journalFile,
-    pluginsDir: customPluginsDir,
-    distDir: customDistDir,
-    logger: console,
-  });
+  let rollbackDeployment = async (reasonErr = null) => {
+    try {
+      await recoverInterruptedDeployment({
+        journalFile,
+        pluginsDir: customPluginsDir,
+        distDir: customDistDir,
+        logger: console,
+      });
+    } catch {}
+  };
+
+  try {
+    // 1. Startup Recovery: Inspect and safely recover any interrupted deployment BEFORE reading cache
+    await recoverInterruptedDeployment({
+      journalFile,
+      pluginsDir: customPluginsDir,
+      distDir: customDistDir,
+      logger: console,
+    });
 
   // 2. Load Build Cache with Context-Aware Schema Validation
   let cache = {};
@@ -762,7 +1055,7 @@ export async function runPipelineOrchestration(options = {}) {
 
   const stagedReceipts = {};
 
-  const rollbackDeployment = async (reasonErr = null) => {
+  rollbackDeployment = async (reasonErr = null) => {
     if (txManager.isCommitted) {
       console.warn("⚠️ Transaction is already committed. Executing forward cleanup instead of rollback...");
       try {
@@ -994,6 +1287,7 @@ export async function runPipelineOrchestration(options = {}) {
   dag.addNode("plan", {
     dependencies: ["fingerprint"],
     task: async ({ fingerprint }) => {
+      const activeProfile = activeIsObfuscate ? "s" : "clean";
       return planDependencyGraphBuild({
         targetPlugins,
         previousCache: cache,
@@ -1004,6 +1298,8 @@ export async function runPipelineOrchestration(options = {}) {
           toolchain: fingerprint.toolchain,
         },
         mode: activeIsForce ? "force" : (activeIsChanged ? "changed" : "incremental"),
+        profile: activeProfile,
+        options: options.buildOptions || {},
       });
     },
   });
@@ -1013,16 +1309,38 @@ export async function runPipelineOrchestration(options = {}) {
     dag.addNode(`build:${plugin}`, {
       dependencies: ["plan"],
       task: async ({ plan }, taskOptions) => {
+        // Single source of truth: obfuscate flag decides the tier. options.profile
+        // alone never flips the tier (prevents clean-plan/S-build divergence).
         const pluginPlan = plan[plugin];
-        const profileSZip = path.join(customDistDir, `${plugin}-profile-s.zip`);
-        const standardZip = path.join(customDistDir, `${plugin}.zip`);
+        const parsedFlags = options.parsed || {};
+        const pluginBuildPlan = createBuildPlan({
+          consumer: plugin,
+          profile: parsedFlags.profile || (activeIsObfuscate ? "s" : "clean"),
+          isObfuscate: activeIsObfuscate,
+          obfuscate: parsedFlags.obfuscate,
+          inlineFramework: options.inlineFramework ?? parsedFlags.inlineFramework,
+          spaghetti: options.spaghetti ?? parsedFlags.spaghetti,
+          minifyAssets: options.minifyAssets ?? parsedFlags.minifyAssets,
+          skipZip: options.skipZip ?? parsedFlags.skipZip,
+          targetPhp: options.targetPhp ?? parsedFlags.targetPhp,
+        });
+        const activeProfile = pluginBuildPlan.capabilities.inlineFramework
+          && pluginBuildPlan.capabilities.spaghetti
+          && pluginBuildPlan.capabilities.obfuscate
+          ? "s"
+          : "clean";
+        const targetZipPath = path.join(customDistDir, resolveArtifactZipName(pluginBuildPlan));
 
         const cachedArtifact = cache.artifacts?.[plugin];
+        // Always enforce profile identity: clean and S artifacts are never
+        // interchangeable, even for legacy cache records without profile info.
+        const expectedProfile = activeProfile;
         const cacheValidation = await validateCachedTargetArtifact({
           cacheRecord: cachedArtifact,
-          zipPath: profileSZip,
+          zipPath: targetZipPath,
           consumer: plugin,
           expectedCompositeFingerprint: pluginPlan.compositeFingerprint,
+          expectedProfile,
         });
 
         if (!pluginPlan.shouldRebuild && cacheValidation.valid) {
@@ -1050,6 +1368,7 @@ export async function runPipelineOrchestration(options = {}) {
             customPluginsDir,
             customScriptDir,
             isObfuscate: activeIsObfuscate,
+            profile: activeProfile,
             signal: taskOptions?.signal,
           });
         } else {
@@ -1058,16 +1377,24 @@ export async function runPipelineOrchestration(options = {}) {
             consumer: plugin,
             outputDir: customDistDir,
             pluginsDir: customPluginsDir,
-            isObfuscate: activeIsObfuscate,
+            buildPlan: pluginBuildPlan,
+            isObfuscate: pluginBuildPlan.capabilities.obfuscate,
+            profile: activeProfile,
+            inlineFramework: pluginBuildPlan.capabilities.inlineFramework,
+            spaghetti: pluginBuildPlan.capabilities.spaghetti,
+            obfuscate: pluginBuildPlan.capabilities.obfuscate,
+            minifyAssets: pluginBuildPlan.assetPolicy.minifyAssets,
+            skipZip: pluginBuildPlan.skipZip,
+            targetPhp: pluginBuildPlan.targetPhp,
             signal: taskOptions?.signal,
           });
         }
 
-        if (fs.existsSync(profileSZip)) {
-          await copyFile(profileSZip, standardZip);
+        if (!fs.existsSync(targetZipPath)) {
+          throw new Error(`Build finished but expected target ZIP does not exist: ${targetZipPath}`);
         }
 
-        const zipBytes = await fs.promises.readFile(profileSZip);
+        const zipBytes = await fs.promises.readFile(targetZipPath);
         const zipSha256 = crypto.createHash("sha256").update(zipBytes).digest("hex");
         const embedded = readEmbeddedManifestFromZip(zipBytes, plugin);
         if (!embedded.valid) {
@@ -1363,9 +1690,13 @@ export async function runPipelineOrchestration(options = {}) {
           const { fingerprint } = results;
           const stagedCache = results["plan:cache"];
           const bRes = results[`build:${plugin}`];
-          const profileSZip = path.join(customDistDir, `${plugin}-profile-s.zip`);
-          if (!fs.existsSync(profileSZip)) {
-            throw new Error(`Cannot deploy '${plugin}': missing ZIP artifact at ${profileSZip}`);
+          // Deploy the artifact tier that was actually built. Clean builds must
+          // never deploy a stale Profile S ZIP (and vice versa).
+          const deployZip = activeIsObfuscate
+            ? path.join(customDistDir, `${plugin}-profile-s.zip`)
+            : path.join(customDistDir, `${plugin}.zip`);
+          if (!fs.existsSync(deployZip)) {
+            throw new Error(`Cannot deploy '${plugin}': missing ZIP artifact at ${deployZip}`);
           }
 
           // Strictly gate deployment on verified test coverage
@@ -1390,7 +1721,7 @@ export async function runPipelineOrchestration(options = {}) {
           }
 
           const receiptFile = path.join(customReceiptsDir, `${plugin}.receipt.json`);
-          const currentZipBytes = await fs.promises.readFile(profileSZip);
+          const currentZipBytes = await fs.promises.readFile(deployZip);
           const currentZipSha = crypto.createHash("sha256").update(currentZipBytes).digest("hex");
           const targetDir = path.join(customPluginsDir, plugin);
 
@@ -1415,7 +1746,7 @@ export async function runPipelineOrchestration(options = {}) {
               const tStat = await fs.promises.lstat(targetDir);
               const bStat = await fs.promises.lstat(bootstrapPath);
               if (!tStat.isSymbolicLink() && tStat.isDirectory() && !bStat.isSymbolicLink() && bStat.isFile()) {
-                const verifyReport = await verifyArtifactManifest({ rootDir: targetDir, consumer: plugin, profile: "Profile S" });
+                const verifyReport = await verifyArtifactManifest({ rootDir: targetDir, consumer: plugin, profile: activeIsObfuscate ? "Profile S" : "clean" });
                 if (
                   verifyReport.status === "valid" &&
                   verifyReport.manifestDigest === rcpt.manifestDigest &&
@@ -1461,9 +1792,11 @@ export async function runPipelineOrchestration(options = {}) {
             throw new Error("Injected failure before deploy swap");
           }
 
-          const deployResult = await atomicDeployPlugin(profileSZip, plugin, {
+          const deployResult = await atomicDeployPlugin(deployZip, plugin, {
             pluginsDir: customPluginsDir,
             contentRoot: customContentRoot,
+            parentLockToken: pipelineLock.token,
+            skipPluginLock: true,
             signal: taskOptions?.signal,
             bootstrapFile: bootstrapRelFile,
             preserveBackup: true,
@@ -1779,6 +2112,21 @@ export async function runPipelineOrchestration(options = {}) {
         state.phase = "committed";
       });
 
+      if (activeIsObfuscate) {
+        for (const p of targetPlugins) {
+          const profileSZip = path.join(customDistDir, `${p}-profile-s.zip`);
+          const standardZip = path.join(customDistDir, `${p}.zip`);
+          if (fs.existsSync(profileSZip)) {
+            // Atomic alias publish: temp file + rename + fsync so an interrupted
+            // copy can never leave a truncated live `{p}.zip`.
+            const tmpAlias = path.join(customDistDir, `.${p}.zip.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+            await copyFile(profileSZip, tmpAlias);
+            await rename(tmpAlias, standardZip);
+            await fsyncDir(customDistDir);
+          }
+        }
+      }
+
       if (injectFailure === "during_cleanup") {
         throw new Error("Injected failure during cleanup");
       }
@@ -1831,7 +2179,6 @@ export async function runPipelineOrchestration(options = {}) {
     },
   });
 
-  try {
     const dagResults = await dag.run();
     return dagResults;
   } catch (err) {
@@ -1839,6 +2186,241 @@ export async function runPipelineOrchestration(options = {}) {
       await rollbackDeployment(err);
     }
     throw err;
+  } finally {
+    await pipelineLock.release().catch(() => {});
+  }
+}
+
+export async function runDirectDeployTransaction({
+  zipPath,
+  pluginSlug,
+  options = {},
+}) {
+  if (!zipPath || !fs.existsSync(zipPath)) {
+    throw new Error(`Plugin ZIP archive not found at '${zipPath}'`);
+  }
+  if (!pluginSlug || !isValidConsumerName(pluginSlug)) {
+    throw new Error(`Invalid plugin slug '${pluginSlug}': must be a safe lowercase alphanumeric kebab-case slug`);
+  }
+
+  const contentRoot = canonicalizePath(
+    options.contentRoot
+      ? path.resolve(options.contentRoot)
+      : options.pluginsDir
+        ? path.dirname(path.resolve(options.pluginsDir))
+        : defaultContentRoot()
+  );
+  const pluginsDir = canonicalizePath(
+    options.pluginsDir
+      ? path.resolve(options.pluginsDir)
+      : path.join(contentRoot, "plugins")
+  );
+  const distDir = canonicalizePath(options.distDir || path.join(contentRoot, "dist"));
+  const receiptsDir = canonicalizePath(options.receiptsDir || path.join(distDir, ".deploy-receipts"));
+  const journalFile = path.join(distDir, ".deploy-journal.json");
+
+  await fs.promises.mkdir(distDir, { recursive: true });
+  await fs.promises.mkdir(receiptsDir, { recursive: true });
+  await fs.promises.mkdir(pluginsDir, { recursive: true });
+
+  const transactionLockFile = path.join(distDir, ".transaction.deploy.lock");
+  const lock = await acquireInterProcessLock({
+    lockFile: transactionLockFile,
+    resourceName: `direct-deploy-${pluginSlug}`,
+    signal: options.signal,
+  });
+
+  try {
+    const recResult = await recoverInterruptedDeployment({
+      journalFile,
+      pluginsDir,
+      distDir,
+      logger: options.logger || console,
+      allowExternalConsumers: options.allowExternalConsumers ?? (!ALLOWED_CONSUMERS.has(pluginSlug)),
+    });
+    if (recResult.recovered && typeof options.onRecovered === "function") {
+      await options.onRecovered(recResult);
+    }
+
+    const zipBytes = await fs.promises.readFile(zipPath);
+    const zipSha256 = crypto.createHash("sha256").update(zipBytes).digest("hex");
+    let candidateManifestDigest = null;
+    try {
+      const embedded = readEmbeddedManifestFromZip(zipBytes, pluginSlug);
+      if (embedded?.manifest?.manifestDigest) {
+        candidateManifestDigest = embedded.manifest.manifestDigest;
+      }
+    } catch {}
+    if (!candidateManifestDigest || typeof candidateManifestDigest !== "string" || !/^[a-f0-9]{64}$/i.test(candidateManifestDigest)) {
+      candidateManifestDigest = zipSha256;
+    }
+
+    const targetDir = path.join(pluginsDir, pluginSlug);
+    const preExisting = fs.existsSync(targetDir);
+
+    const txId = `tx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const backupToken = `.${pluginSlug}.backup-${txId}`;
+    const stagingToken = `.${pluginSlug}.staging-${txId}`;
+
+    const initialTxContext = {
+      schemaVersion: DEPLOY_JOURNAL_SCHEMA_VERSION,
+      txId,
+      revision: 1,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      phase: "prepared",
+      targets: [
+        {
+          consumer: pluginSlug,
+          preExisting,
+          phase: "prepared",
+          backupToken,
+          stagingToken,
+          candidateZipSha: zipSha256,
+          candidateManifestDigest,
+        },
+      ],
+      publication: {
+        receipts: {},
+        cache: null,
+        backupsPurged: false,
+      },
+      error: null,
+    };
+
+    const txManager = new TransactionJournalManager({
+      journalFile,
+      distDir,
+      initialJournal: initialTxContext,
+    });
+    await txManager.update(async () => {});
+
+    let deployResult;
+    try {
+      deployResult = await atomicDeployPlugin(zipPath, pluginSlug, {
+        ...options,
+        contentRoot,
+        pluginsDir,
+        backupToken,
+        stagingToken,
+        parentLockToken: lock.token,
+        skipPluginLock: true,
+        // Bind the deployed bytes to the digest recorded in journal/receipt.
+        // atomicDeployPlugin re-reads the file and fails closed on mismatch,
+        // closing the read -> deploy TOCTOU window.
+        expectedZipSha: zipSha256,
+        preserveBackup: Boolean(options.preserveBackup),
+        onPhaseChange: async (newPhase) => {
+          await txManager.update(async (state) => {
+            const tgt = state.targets[0];
+            if (tgt) {
+              tgt.phase = newPhase;
+            }
+          });
+          if (typeof options.onPhaseChange === "function") {
+            await options.onPhaseChange(newPhase);
+          }
+        },
+      });
+
+      const receiptData = createDeployReceiptRecord({
+        consumer: pluginSlug,
+        zipSha256,
+        manifestDigest: candidateManifestDigest,
+        targetPath: targetDir,
+        transactionId: txId,
+      });
+
+      const receiptFile = path.join(receiptsDir, `${pluginSlug}.receipt.json`);
+      let receiptExistedBefore = false;
+      let receiptPreDigest = null;
+      let receiptBackupStatus = "absent";
+      if (fs.existsSync(receiptFile)) {
+        const destBytes = await fs.promises.readFile(receiptFile);
+        receiptPreDigest = crypto.createHash("sha256").update(destBytes).digest("hex");
+        receiptExistedBefore = true;
+        receiptBackupStatus = "backed_up";
+      }
+
+      const receiptBytes = Buffer.from(JSON.stringify(receiptData, null, 2), "utf8");
+      const stagedReceiptDigest = crypto.createHash("sha256").update(receiptBytes).digest("hex");
+
+      const customCacheFile = path.join(distDir, ".build-cache.json");
+      let cacheExistedBefore = false;
+      let cachePreDigest = null;
+      let cacheBackupStatus = "absent";
+      let cacheStagedDigest = "0".repeat(64);
+      if (fs.existsSync(customCacheFile)) {
+        const cBytes = await fs.promises.readFile(customCacheFile);
+        cachePreDigest = crypto.createHash("sha256").update(cBytes).digest("hex");
+        cacheStagedDigest = cachePreDigest;
+        cacheExistedBefore = true;
+        cacheBackupStatus = "backed_up";
+      }
+
+      await txManager.update(async (state) => {
+        state.phase = "publishing";
+        state.publication.receipts[pluginSlug] = {
+          consumer: pluginSlug,
+          existedBefore: receiptExistedBefore,
+          preDigest: receiptPreDigest,
+          backupStatus: receiptBackupStatus,
+          stagedDigest: stagedReceiptDigest,
+          publishStatus: "publishing",
+          finalDigest: null,
+        };
+        state.publication.cache = {
+          existedBefore: cacheExistedBefore,
+          preDigest: cachePreDigest,
+          backupStatus: cacheBackupStatus,
+          stagedDigest: cacheStagedDigest,
+          publishStatus: "publishing",
+          finalDigest: null,
+        };
+      });
+
+      await writeAtomicCacheFile(receiptFile, receiptData);
+      await fsyncDir(receiptsDir);
+
+      await txManager.update(async (state) => {
+        state.phase = "committed";
+        state.publication.receipts[pluginSlug].publishStatus = "published";
+        state.publication.receipts[pluginSlug].finalDigest = stagedReceiptDigest;
+        state.publication.cache.publishStatus = "published";
+        state.publication.cache.finalDigest = cacheStagedDigest;
+      });
+
+      if (!options.preserveBackup) {
+        await txManager.update(async (state) => {
+          state.publication.backupsPurged = true;
+          state.phase = "cleanup_complete";
+        });
+      }
+
+      txManager.terminate();
+      if (!options.preserveBackup && fs.existsSync(journalFile)) {
+        await fs.promises.rm(journalFile, { force: true });
+      }
+
+      return {
+        success: true,
+        deployedTargetDir: deployResult.deployedTargetDir,
+        backupDir: deployResult.backupDir,
+        txId,
+        receiptFile,
+      };
+    } catch (deployErr) {
+      await txManager.update(async (state) => {
+        state.error = {
+          message: deployErr.message,
+          phase: state.phase,
+        };
+      }).catch(() => {});
+      txManager.terminate();
+      throw deployErr;
+    }
+  } finally {
+    await lock.release().catch(() => {});
   }
 }
 
@@ -1875,6 +2457,12 @@ async function main(options = {}) {
     pluginsDir: parsed.pluginsDir,
     cacheFile: parsed.cacheFile,
     receiptsDir: parsed.receiptsDir,
+    inlineFramework: parsed.inlineFramework,
+    spaghetti: parsed.spaghetti,
+    obfuscate: parsed.obfuscate,
+    minifyAssets: parsed.minifyAssets,
+    skipZip: parsed.skipZip,
+    targetPhp: parsed.targetPhp,
   });
 
   let rebuiltCount = 0;
@@ -1946,11 +2534,12 @@ async function startWatchMode() {
     }, 250);
   };
 
+  const watchContentRoot = defaultContentRoot();
   const watchDirs = [
-    path.join(contentRoot, "plugins", "wpdev"),
-    ...TARGET_PLUGINS.map((p) => path.join(contentRoot, "plugins", `${p}-dev`)),
+    path.join(watchContentRoot, "plugins", "wpdev"),
+    ...TARGET_PLUGINS.map((p) => path.join(watchContentRoot, "plugins", `${p}-dev`)),
     scriptDir,
-    path.join(contentRoot, "themes", "tavangary"),
+    path.join(watchContentRoot, "themes", "tavangary"),
   ].filter((d) => fs.existsSync(d));
 
   const watchers = watchDirs.map((d) => fs.watch(d, { recursive: true }, onFsChange));

@@ -17,13 +17,47 @@ import {
   requireRectorForProfileS,
   validatePhpSyntaxTree,
 } from "../profile-s-fail-closed.mjs";
+import {
+  BUILD_PLAN_SCHEMA_VERSION,
+  UNRESOLVED_CHOICES,
+  createBuildPlan,
+  deriveCapabilityTag,
+  validateBuildPlan,
+} from "../build-plan.mjs";
 
 test("parseClosedProfileFlags accepts --obfuscate and --profile=s as Profile S", () => {
-  assert.deepEqual(parseClosedProfileFlags(["--obfuscate"]), { profile: "s", isObfuscate: true });
-  assert.deepEqual(parseClosedProfileFlags(["--profile=s"]), { profile: "s", isObfuscate: true });
-  assert.deepEqual(parseClosedProfileFlags(["--obfuscate", "--profile=s"]), { profile: "s", isObfuscate: true });
-  assert.deepEqual(parseClosedProfileFlags([]), { profile: "clean", isObfuscate: false });
-  assert.deepEqual(parseClosedProfileFlags(["--profile=clean"]), { profile: "clean", isObfuscate: false });
+  for (const argv of [["--obfuscate"], ["--profile=s"], ["--obfuscate", "--profile=s"]]) {
+    const flags = parseClosedProfileFlags(argv);
+    assert.equal(flags.profile, "s");
+    assert.equal(flags.isObfuscate, true);
+    assert.equal(flags.inlineFramework, true);
+    assert.equal(flags.spaghetti, true);
+    assert.equal(flags.obfuscate, true);
+  }
+  const clean = parseClosedProfileFlags([]);
+  assert.equal(clean.profile, "clean");
+  assert.equal(clean.isObfuscate, false);
+  assert.equal(clean.inlineFramework, true);
+  assert.equal(clean.spaghetti, false);
+  assert.deepEqual(parseClosedProfileFlags(["--profile=clean"]).profile, "clean");
+});
+
+test("parseClosedProfileFlags supports independent capability flags without changing --obfuscate-alone", () => {
+  const inlineOnly = parseClosedProfileFlags(["--inline-framework"]);
+  assert.equal(inlineOnly.profile, "custom");
+  assert.equal(inlineOnly.inlineFramework, true);
+  assert.equal(inlineOnly.spaghetti, false);
+  assert.equal(inlineOnly.obfuscate, false);
+
+  const spaghettiOnly = parseClosedProfileFlags(["--spaghetti"]);
+  assert.equal(spaghettiOnly.spaghetti, true);
+  assert.equal(spaghettiOnly.obfuscate, false);
+  assert.equal(spaghettiOnly.inlineFramework, false);
+
+  const obfuscateOnly = parseClosedProfileFlags(["--inline-framework", "--obfuscate"]);
+  assert.equal(obfuscateOnly.inlineFramework, true);
+  assert.equal(obfuscateOnly.spaghetti, false);
+  assert.equal(obfuscateOnly.obfuscate, true);
 });
 
 test("parseClosedProfileFlags rejects unknown and conflicting profiles", () => {
@@ -61,12 +95,24 @@ test("parseTransformerBatchLog requires valid JSON records for every expected PH
   );
 
   const files = ["/tmp/a.php", "/tmp/b.php"];
-  const log = JSON.stringify([{ file: files[0] }, { file: files[1] }]);
+  const good = (f) => ({ file: f, sha256: "a".repeat(64), bytes: 12 });
+  const log = JSON.stringify([good(files[0]), good(files[1])]);
   const parsed = parseTransformerBatchLog(log, { expectedFiles: files });
   assert.equal(parsed.length, 2);
 
+  // F11: records without a verified content hash and byte count prove nothing
+  // about the write and must fail closed.
   assert.throws(
-    () => parseTransformerBatchLog(JSON.stringify([{ file: files[0] }]), { expectedFiles: files }),
+    () => parseTransformerBatchLog(JSON.stringify([good(files[0]), { file: files[1] }])),
+    /missing a valid sha256/,
+  );
+  assert.throws(
+    () => parseTransformerBatchLog(JSON.stringify([good(files[0]), { file: files[1], sha256: "b".repeat(64), bytes: 0 }])),
+    /missing a valid byte count/,
+  );
+
+  assert.throws(
+    () => parseTransformerBatchLog(JSON.stringify([good(files[0])]), { expectedFiles: files }),
     /omitted 1 PHP file/,
   );
 });
@@ -243,4 +289,114 @@ test("collectFirstPartyPhpFiles skips vendor trees", async () => {
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
+});
+
+test("createBuildPlan initializes versioned BuildPlan and handles all 8 capability matrix combinations", () => {
+  const combos = [
+    { inlineFramework: false, spaghetti: false, obfuscate: false, tag: "clean" },
+    { inlineFramework: true, spaghetti: false, obfuscate: false, tag: "standalone" },
+    { inlineFramework: false, spaghetti: true, obfuscate: false, tag: "spaghetti" },
+    { inlineFramework: false, spaghetti: false, obfuscate: true, tag: "obfuscated" },
+    { inlineFramework: true, spaghetti: true, obfuscate: false, tag: "standalone-spaghetti" },
+    { inlineFramework: true, spaghetti: false, obfuscate: true, tag: "standalone-obfuscated" },
+    { inlineFramework: false, spaghetti: true, obfuscate: true, tag: "spaghetti-obfuscated" },
+    { inlineFramework: true, spaghetti: true, obfuscate: true, tag: "standalone-spaghetti-obfuscated" },
+  ];
+
+  for (const combo of combos) {
+    const plan = createBuildPlan({
+      consumer: "test-plugin",
+      inlineFramework: combo.inlineFramework,
+      spaghetti: combo.spaghetti,
+      obfuscate: combo.obfuscate,
+    });
+    assert.equal(plan.schemaVersion, BUILD_PLAN_SCHEMA_VERSION);
+    assert.equal(plan.consumer, "test-plugin");
+    assert.equal(plan.capabilities.inlineFramework, combo.inlineFramework);
+    assert.equal(plan.capabilities.spaghetti, combo.spaghetti);
+    assert.equal(plan.capabilities.obfuscate, combo.obfuscate);
+    assert.equal(plan.artifactIdentity.capabilityTag, combo.tag);
+    assert.equal(validateBuildPlan(plan), true);
+  }
+});
+
+test("createBuildPlan treats obfuscate-true without independent flags as legacy Profile S", () => {
+  const plan = createBuildPlan({ consumer: "test-plugin", obfuscate: true });
+  assert.equal(plan.capabilities.inlineFramework, true);
+  assert.equal(plan.capabilities.spaghetti, true);
+  assert.equal(plan.capabilities.obfuscate, true);
+  const standaloneObf = createBuildPlan({
+    consumer: "test-plugin",
+    inlineFramework: true,
+    spaghetti: false,
+    obfuscate: true,
+  });
+  assert.equal(standaloneObf.artifactIdentity.capabilityTag, "standalone-obfuscated");
+});
+
+test("createBuildPlan maps legacy presets and rejects contradictory/missing prerequisites", () => {
+  // Legacy clean
+  const cleanPlan = createBuildPlan({ consumer: "test-plugin", profile: "clean" });
+  assert.equal(cleanPlan.capabilities.inlineFramework, true);
+  assert.equal(cleanPlan.capabilities.spaghetti, false);
+  assert.equal(cleanPlan.capabilities.obfuscate, false);
+
+  // Legacy S
+  const sPlan = createBuildPlan({ consumer: "test-plugin", profile: "s" });
+  assert.equal(sPlan.capabilities.inlineFramework, true);
+  assert.equal(sPlan.capabilities.spaghetti, true);
+  assert.equal(sPlan.capabilities.obfuscate, true);
+
+  // Missing consumer prerequisite
+  assert.throws(() => createBuildPlan({}), /BuildPlan prerequisite missing: 'consumer' slug is required/);
+
+  // Unsupported PHP target
+  assert.throws(
+    () => createBuildPlan({ consumer: "test-plugin", targetPhp: "5.6" }),
+    /BuildPlan invalid target PHP '5.6'/,
+  );
+
+  // Contradictory options
+  assert.throws(
+    () => createBuildPlan({ consumer: "test-plugin", profile: "clean", obfuscate: true }),
+    /Contradictory options: profile='clean' cannot be combined with obfuscate=true/,
+  );
+  assert.throws(
+    () => createBuildPlan({ consumer: "test-plugin", profile: "s", isObfuscate: false }),
+    /Contradictory options: profile='s' cannot claim isObfuscate=false without transform/,
+  );
+});
+
+test("UNRESOLVED_CHOICES locks C1-C4 policies per fix plan v2", () => {
+  assert.equal(UNRESOLVED_CHOICES.C1_SHORT_NAME_COLLISIONS.status, "LOCKED_FAIL_CLOSED");
+  assert.equal(UNRESOLVED_CHOICES.C1_SHORT_NAME_COLLISIONS.gatedTask, 6);
+  assert.equal(UNRESOLVED_CHOICES.C2_LEGACY_OBFUSCATE_OPTION.status, "DOCUMENTED_PRESETS");
+  assert.equal(UNRESOLVED_CHOICES.C3_CLOSURE_BOUNDARY.status, "EXPLICIT_PROVIDER_REQUIRED");
+  assert.equal(UNRESOLVED_CHOICES.C3_CLOSURE_BOUNDARY.gatedTask, 7);
+  assert.equal(UNRESOLVED_CHOICES.C4_EXTENDED_SPAGHETTI.status, "MINIMUM_MODE_CONFIRMED");
+});
+
+test("assertSymbolMapHasNoCollisions enforces C1 fail-closed on namespace flatten short-name collisions", () => {
+  const collidingMap = {
+    classes: {
+      "Acme\\User": "_c_1111",
+      "Beta\\User": "_c_2222",
+    },
+  };
+
+  // When checkFlattenCollisions is false (obfuscate-only without flattening), two different mangled names pass
+  assert.equal(assertSymbolMapHasNoCollisions(collidingMap, { checkFlattenCollisions: false }), 2);
+
+  // When checkFlattenCollisions is true (C1 gate for spaghetti/flattening), it must fail closed
+  assert.throws(
+    () =>
+      assertSymbolMapHasNoCollisions(collidingMap, {
+        checkFlattenCollisions: true,
+        symbolPaths: {
+          "Acme\\User": "src/Acme/User.php",
+          "Beta\\User": "src/Beta/User.php",
+        },
+      }),
+    /short-name collision under namespace flattening: 'user' is shared by multiple FQCNs: \[Acme\\User \(src\/Acme\/User\.php\), Beta\\User \(src\/Beta\/User\.php\)\]/,
+  );
 });

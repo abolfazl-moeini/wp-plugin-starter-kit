@@ -996,12 +996,14 @@ test("Regression 22: Incremental build planner invariant: exactly 1 rebuilt and 
         wpdevFingerprint: fp.wpdev,
         pluginSourceFingerprint: fp.plugins[consumer],
         toolchainFingerprint: fp.toolchain,
+        profile: "s",
       });
 
       artifactsCache[consumer] = {
         schemaVersion: 2,
         artifactId: `${consumer}-profile-s`,
         consumer,
+        profile: "s",
         sourceFingerprint: fp.plugins[consumer],
         wpdevFingerprint: fp.wpdev,
         toolsFingerprint: fp.tools,
@@ -1046,6 +1048,7 @@ test("Regression 22: Incremental build planner invariant: exactly 1 rebuilt and 
       previousCache: initialCache,
       targetPlugins: ["tavangary-core", "tavangary-theme-panel", "wpdev-crm", "wpdev-tickets"],
       mode: "incremental",
+      profile: "s",
     });
     for (const p of ["tavangary-core", "tavangary-theme-panel", "wpdev-crm", "wpdev-tickets"]) {
       assert.equal(untouchedPlan[p]?.shouldRebuild, false, `Untouched plugin ${p} must be cached`);
@@ -1070,6 +1073,7 @@ test("Regression 22: Incremental build planner invariant: exactly 1 rebuilt and 
       previousCache: initialCache,
       targetPlugins: ["tavangary-core", "tavangary-theme-panel", "wpdev-crm", "wpdev-tickets"],
       mode: "incremental",
+      profile: "s",
     });
 
     assert.equal(plan["tavangary-core"]?.shouldRebuild, true, "Changed plugin must be planned for rebuild");
@@ -1084,6 +1088,7 @@ test("Regression 22: Incremental build planner invariant: exactly 1 rebuilt and 
       previousCache: { schemaVersion: 2, artifacts: {} },
       targetPlugins: ["tavangary-core"],
       mode: "incremental",
+      profile: "s",
     });
     assert.equal(emptyCachePlan["tavangary-core"]?.shouldRebuild, true);
     assert.equal(emptyCachePlan["tavangary-core"]?.reason, "No previous build cache found");
@@ -1101,6 +1106,7 @@ test("Regression 22: Incremental build planner invariant: exactly 1 rebuilt and 
       overrideChanged: true,
       overrideForce: false,
       overrideDeploy: false,
+      overrideObfuscate: true,
       jobsLimit: 4,
       buildCandidate: async ({ plugin, customDistDir }) => {
         const fix = await createHermeticZipFixture({ tmpDir, consumer: plugin });

@@ -79,6 +79,27 @@ function {slug}_wpdev_dependency_notice() {
 The check runs at `admin_notices` time so plugin load order does not
 matter.
 
+## Access Control & Two-Gate Defense
+
+When integrated with the WPDev framework (`phpFramework: wpdev`), kit modules align their domain access control with the framework's Two-Gate Defense architecture:
+
+1. **Permission Catalog:** On `wpdev_load`, register feature permissions with `wpdev_register_permission()`:
+   ```php
+   wpdev_register_permission( 'my_plugin.items.view', array(
+       'owner'      => 'my-plugin',
+       'capability' => 'my_plugin_view_items',
+       'scope'      => 'site',
+       'risk'       => 'read',
+       'label'      => __( 'View Items', 'my-plugin' ),
+   ) );
+   ```
+2. **Two-Gate Evaluation:** For privileged actions and REST routes, check both Gate 1 (WP role capability) and Gate 2 (AccessManager policy):
+   ```php
+   return CapabilityPolicy::can( 'my_plugin_view_items' )
+       && CapabilityPolicy::access( new ItemAccess(), ItemAccess::VIEW );
+   ```
+3. **Framework Surfaces:** In WPDev admin pages, list tables declare `protected $access = 'my_plugin.items.view';` and modal forms pass `'access' => 'my_plugin.items.create'`.
+
 ## Related files
 
 | Path                               | Role                    |

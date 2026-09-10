@@ -58,10 +58,15 @@ vendor/                       # Composer only; never put feature code here
   `Plugin::config()` otherwise produce empty script URLs (`Unexpected token '<'`)
   or silently drop scripts whose deps never registered.
 - **ALWAYS** security: capability/nonce, sanitize in, escape out, REST `permission_callback`.
+- **ALWAYS** enforce the **Two-Gate Defense-in-Depth Model** on privileged endpoints:
+  - **Gate 1 (Native WP Capability):** role/capability boundaries checked via `current_user_can()`, `$supported_panels`, or `CapabilityPolicy::can()`.
+  - **Gate 2 (AccessManager Domain Policy):** fine-grained domain logic checked via `CapabilityPolicy::access()` / `have_access()` or framework `wpdev_can()`.
 - **ALWAYS** add `src/Modules/{Name}/Access/{Name}Access.php` (extends `UserAccess`)
   when the module has admin ajax / REST / menu / CSV / settings gates. Declare
   named rules in `describe(BluePrint)`; check with `have_access()` or
-  `CapabilityPolicy::access()` / `rest_access()`. See
+  `CapabilityPolicy::access()` / `rest_access()`. When running in the WPDev
+  framework ecosystem (`phpFramework: wpdev`), declare domain permissions with
+  `wpdev_register_permission()` on `wpdev_load`. See
   [references/support-packages.md](references/support-packages.md).
 - **NEVER** scatter feature-level `current_user_can('manage_*'|'edit_products'|…)`
   once an Access class exists for that gate — use the named rule instead.
@@ -245,18 +250,24 @@ final class MyFeatureAccess extends UserAccess
     }
 }
 
-// Runtime (ajax / admin_post / REST permission_callback):
-CapabilityPolicy::access(new MyFeatureAccess(), MyFeatureAccess::EDIT_ITEMS);
-// or: (new MyFeatureAccess())->have_access(MyFeatureAccess::EDIT_ITEMS);
+// Runtime (Two-Gate Defense in REST permission_callback or mutating action):
+public function rest_permission(): bool
+{
+    // Gate 1 (WP Capability) + Gate 2 (AccessManager Domain Policy)
+    return CapabilityPolicy::can(MyFeatureAccess::CAP_EDIT)
+        && CapabilityPolicy::access(new MyFeatureAccess(), MyFeatureAccess::EDIT_ITEMS);
+}
+// or direct: (new MyFeatureAccess())->have_access(MyFeatureAccess::EDIT_ITEMS);
 ```
 
 Checklist when adding a module:
 
 1. Create `Access/{Name}Access.php` with rule-id + `CAP_*` constants.
-2. Replace feature-level `current_user_can(...)` call sites with `have_access` /
+2. Enforce the **Two-Gate Defense-in-Depth Model**: Gate 1 for WP capability boundary, Gate 2 for AccessManager domain rules.
+3. Replace feature-level `current_user_can(...)` call sites with `have_access` /
    `CapabilityPolicy::access`.
-3. Point menu/`$supported_panels` at `XAccess::CAP_*` (string still required by WP).
-4. Add `tests/phpunit/Modules/{Name}/AccessTest.php` (`login('role')` true/false).
+4. Point menu/`$supported_panels` at `XAccess::CAP_*` (Gate 1 string required by WP).
+5. Add `tests/phpunit/Modules/{Name}/AccessTest.php` (`login('role')` true/false).
 
 ### Assets slice
 

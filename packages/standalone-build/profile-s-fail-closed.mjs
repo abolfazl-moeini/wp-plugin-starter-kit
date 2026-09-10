@@ -23,12 +23,71 @@ const REQUIRED_BUILD_TOOLS = [
   ["composer", ["--version"]],
 ];
 
+function readArgValue(argv, index, flag) {
+  const arg = argv[index];
+  if (arg === flag) {
+    const next = argv[index + 1];
+    if (!next || next.startsWith("--")) {
+      throw new Error(`Invalid ${flag}: a value is required`);
+    }
+    return { value: next, consumed: 1 };
+  }
+  if (arg === `${flag}=`) {
+    throw new Error(`Invalid ${flag}: a value is required`);
+  }
+  if (typeof arg === "string" && arg.startsWith(`${flag}=`)) {
+    return { value: arg.slice(`${flag}=`.length), consumed: 0 };
+  }
+  return null;
+}
+
 export function parseClosedProfileFlags(argv = []) {
   const selected = [];
+  let inlineFramework;
+  let spaghetti;
+  let minifyAssets;
+  let skipZip = false;
+  let targetPhp;
+  let sawObfuscateFlag = false;
+
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--obfuscate") {
-      selected.push("s");
+      sawObfuscateFlag = true;
+      continue;
+    }
+    if (arg === "--inline-framework") {
+      inlineFramework = true;
+      continue;
+    }
+    if (arg === "--no-inline-framework") {
+      inlineFramework = false;
+      continue;
+    }
+    if (arg === "--spaghetti") {
+      spaghetti = true;
+      continue;
+    }
+    if (arg === "--no-spaghetti") {
+      spaghetti = false;
+      continue;
+    }
+    if (arg === "--minify-assets") {
+      minifyAssets = true;
+      continue;
+    }
+    if (arg === "--no-minify-assets") {
+      minifyAssets = false;
+      continue;
+    }
+    if (arg === "--skip-zip") {
+      skipZip = true;
+      continue;
+    }
+    const targetPhpArg = readArgValue(argv, i, "--target-php");
+    if (targetPhpArg) {
+      targetPhp = String(targetPhpArg.value).trim();
+      i += targetPhpArg.consumed;
       continue;
     }
     if (arg === "--profile") {
@@ -59,14 +118,46 @@ export function parseClosedProfileFlags(argv = []) {
       selected.push(value);
     }
   }
+  const hasIndependentCapability = inlineFramework !== undefined || spaghetti !== undefined;
+  if (sawObfuscateFlag && !hasIndependentCapability) {
+    selected.push("s");
+  }
   const unique = [...new Set(selected)];
   if (unique.length > 1) {
     throw new Error(`Conflicting profile flags: ${unique.join(", ")}`);
   }
-  const profile = unique[0] || "clean";
+
+  const legacyProfile = unique[0] || (hasIndependentCapability ? null : "clean");
+
+  if (hasIndependentCapability) {
+    const obfuscate = Boolean(sawObfuscateFlag || legacyProfile === "s");
+    if (legacyProfile === "clean" && (obfuscate || spaghetti === true)) {
+      throw new Error("Conflicting profile flags: clean, s");
+    }
+    const inlineResolved = inlineFramework ?? (legacyProfile === "s" ? true : false);
+    const spaghettiResolved = spaghetti ?? (legacyProfile === "s" ? true : false);
+    return {
+      profile: legacyProfile || "custom",
+      isObfuscate: obfuscate,
+      inlineFramework: Boolean(inlineResolved),
+      spaghetti: Boolean(spaghettiResolved),
+      obfuscate,
+      minifyAssets,
+      skipZip,
+      targetPhp,
+    };
+  }
+
+  const profile = legacyProfile || "clean";
   return {
     profile,
     isObfuscate: profile === "s",
+    inlineFramework: profile === "s" || profile === "clean" ? true : false,
+    spaghetti: profile === "s",
+    obfuscate: profile === "s",
+    minifyAssets: minifyAssets ?? (profile === "s"),
+    skipZip,
+    targetPhp,
   };
 }
 
@@ -117,6 +208,14 @@ export function parseTransformerBatchLog(stdout, { expectedFiles = null } = {}) 
   for (const rec of parsed) {
     if (!rec || typeof rec !== "object" || Array.isArray(rec) || typeof rec.file !== "string" || rec.file.length === 0) {
       throw new Error("transformer --batch record missing file path");
+    }
+    // F11: a record without a verified content hash and byte count proves
+    // nothing about the write. Forged/truncated entries must fail closed.
+    if (typeof rec.sha256 !== "string" || !/^[a-f0-9]{64}$/i.test(rec.sha256)) {
+      throw new Error(`transformer --batch record for '${rec.file}' is missing a valid sha256 digest`);
+    }
+    if (!Number.isSafeInteger(rec.bytes) || rec.bytes <= 0) {
+      throw new Error(`transformer --batch record for '${rec.file}' is missing a valid byte count`);
     }
   }
 
@@ -177,16 +276,24 @@ export function assertEligibilityAllowsObfuscation(eligibility) {
   return patterns;
 }
 
-export function assertSymbolMapHasNoCollisions(symMap) {
+export function assertSymbolMapHasNoCollisions(symMap, options = {}) {
   if (!symMap || typeof symMap !== "object" || Array.isArray(symMap)) {
     throw new Error("symbol map must be an object");
   }
+  const checkFlattenCollisions = Boolean(
+    options.checkFlattenCollisions ??
+    options.flattenNamespaces ??
+    options.spaghetti ??
+    options.buildPlan?.capabilities?.spaghetti ??
+    false
+  );
+  const symbolPaths = options.symbolPaths || symMap.symbolPaths || symMap.__symbolPaths || {};
   let totalChecked = 0;
   for (const section of ["classes", "functions", "constants"]) {
     const table = symMap[section] && typeof symMap[section] === "object" ? symMap[section] : {};
     const fqcnsByMangled = new Map();
     const globalsByMangled = new Map();
-    const shortNamesFqcnCount = new Map();
+    const shortNamesToFqcns = new Map();
     const caseInsensitive = section === "classes" || section === "functions";
 
     // First pass: register all FQCNs (containing backslash)
@@ -212,8 +319,25 @@ export function assertSymbolMapHasNoCollisions(symMap) {
 
         const shortName = symbol.slice(symbol.lastIndexOf("\\") + 1);
         const shortKey = caseInsensitive ? shortName.toLowerCase() : shortName;
-        shortNamesFqcnCount.set(shortKey, (shortNamesFqcnCount.get(shortKey) || 0) + 1);
+        if (!shortNamesToFqcns.has(shortKey)) {
+          shortNamesToFqcns.set(shortKey, []);
+        }
+        shortNamesToFqcns.get(shortKey).push(symbol);
         totalChecked++;
+      }
+    }
+
+    // C1 Gate: Check short-name collisions across distinct FQCNs under namespace flattening
+    if (checkFlattenCollisions) {
+      for (const [shortKey, fqcns] of shortNamesToFqcns.entries()) {
+        if (fqcns.length > 1) {
+          const pathDetails = fqcns
+            .map((s) => (symbolPaths[s] ? `${s} (${symbolPaths[s]})` : s))
+            .join(", ");
+          throw new Error(
+            `symbol map collision in ${section}: short-name collision under namespace flattening: '${shortKey}' is shared by multiple FQCNs: [${pathDetails}]`,
+          );
+        }
       }
     }
 
@@ -226,9 +350,13 @@ export function assertSymbolMapHasNoCollisions(symMap) {
       const mangledKey = caseInsensitive ? mangled.toLowerCase() : mangled;
       const shortKey = caseInsensitive ? symbol.toLowerCase() : symbol;
 
-      if ((shortNamesFqcnCount.get(shortKey) || 0) > 1) {
+      const fqcnsForShort = shortNamesToFqcns.get(shortKey) || [];
+      if (fqcnsForShort.length > 1) {
+        const pathDetails = fqcnsForShort
+          .map((s) => (symbolPaths[s] ? `${s} (${symbolPaths[s]})` : s))
+          .join(", ");
         throw new Error(
-          `symbol map collision in ${section}: ambiguous short name '${symbol}' belongs to multiple FQCNs and cannot be mapped`,
+          `symbol map collision in ${section}: ambiguous short name '${symbol}' belongs to multiple FQCNs and cannot be mapped${pathDetails ? ` (colliding: ${pathDetails})` : ""}`,
         );
       }
 
@@ -353,17 +481,36 @@ export async function validatePhpSyntaxTree(dir, { phpBin = process.env.WPDEV_PH
       }
   }
   $attrId = defined('T_ATTRIBUTE') ? constant('T_ATTRIBUTE') : -1;
+  $fnId = defined('T_FN') ? constant('T_FN') : T_FUNCTION;
+  $ellipsisId = defined('T_ELLIPSIS') ? constant('T_ELLIPSIS') : -1;
+  $doubleArrowId = defined('T_DOUBLE_ARROW') ? constant('T_DOUBLE_ARROW') : -1;
+  // Significant-token helper: previous/next non-whitespace/comment index.
+  $prevSig = function($tokens, $idx) {
+      for ($j = $idx - 1; $j >= 0; $j--) {
+          $t = $tokens[$j];
+          if (is_array($t) && in_array($t[0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) continue;
+          return $j;
+      }
+      return null;
+  };
+  $nextSig = function($tokens, $idx, $count) {
+      for ($j = $idx + 1; $j < $count; $j++) {
+          $t = $tokens[$j];
+          if (is_array($t) && in_array($t[0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) continue;
+          return $j;
+      }
+      return null;
+  };
   foreach ($iterator as $file) {
       if (!$file->isFile() || $file->getExtension() !== 'php') {
           continue;
       }
       $path = $file->getPathname();
-      if (strpos($path, DIRECTORY_SEPARATOR . 'vendor' . DIRECTORY_SEPARATOR) !== false) {
+      // Dual-load libraries: Real/ implementation is PHP 8.1+ only and conditionally loaded on runtime.
+      if (strpos($path, 'php-fault-tolerance' . DIRECTORY_SEPARATOR . 'src' . DIRECTORY_SEPARATOR . 'Real') !== false) {
           continue;
       }
-      if (strpos($path, DIRECTORY_SEPARATOR . 'vendor-prefixed' . DIRECTORY_SEPARATOR) !== false) {
-          continue;
-      }
+      // Validate all runtime PHP files including vendor and vendor-prefixed
       $code = file_get_contents($path);
       try {
           $tokens = token_get_all($code, TOKEN_PARSE);
@@ -399,7 +546,8 @@ export async function validatePhpSyntaxTree(dir, { phpBin = process.env.WPDEV_PH
               continue;
           }
 
-          if ($tokenId === T_FUNCTION) {
+          if ($tokenId === T_FUNCTION || $tokenId === $fnId) {
+              $isArrow = ($tokenId === $fnId);
               while ($i < $count && $tokens[$i] !== '(') {
                   $i++;
               }
@@ -413,17 +561,58 @@ export async function validatePhpSyntaxTree(dir, { phpBin = process.env.WPDEV_PH
                   $i++;
               }
               $inDefault = false;
+              $visibilityTokens = [T_PUBLIC, T_PROTECTED, T_PRIVATE];
+              if (defined('T_READONLY')) $visibilityTokens[] = constant('T_READONLY');
               foreach ($paramTokens as $pt) {
+                  $ptId = is_array($pt) ? $pt[0] : null;
+                  $ptText = is_array($pt) ? $pt[1] : $pt;
                   if ($pt === '=') $inDefault = true;
                   elseif ($pt === ',') $inDefault = false;
                   elseif (!$inDefault && $pt === '|') {
                       $errors[] = $path . ': PHP 7.4 incompatibility: union type parameter detected in function declaration';
                       break;
                   }
+                  // PHP 8.0+ standalone types that Rector must have downgraded.
+                  // Note: 'static' tokenizes as T_STATIC, not T_STRING.
+                  if (!$inDefault && ($ptId === T_STRING || (defined('T_STATIC') && $ptId === constant('T_STATIC')))) {
+                      $lowerPt = strtolower($ptText);
+                      if (in_array($lowerPt, ['mixed', 'never', 'static'], true)) {
+                          $errors[] = $path . ': PHP 7.4 incompatibility: ' . $ptText . ' type detected in parameter list';
+                          break;
+                      }
+                  }
+                  if (in_array($ptId, $visibilityTokens, true)) {
+                      $errors[] = $path . ': PHP 7.4 incompatibility: constructor property promotion detected in parameter list';
+                      break;
+                  }
+              }
+              for ($pIdx = 0; $pIdx < count($paramTokens); $pIdx++) {
+                  $pToken = $paramTokens[$pIdx];
+                  $pId = is_array($pToken) ? $pToken[0] : null;
+                  $pText = is_array($pToken) ? $pToken[1] : $pToken;
+                  if (defined('T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG') && $pId === constant('T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG')) {
+                      $errors[] = $path . ': PHP 7.4 incompatibility: intersection type parameter detected';
+                      break;
+                  }
+                  if ($pText === '&') {
+                      $nextP = $paramTokens[$pIdx + 1] ?? null;
+                      $nextId = is_array($nextP) ? $nextP[0] : null;
+                      // '&...$args' (by-ref variadic) is valid PHP 7.4; only flag
+                      // '&' that is neither by-ref var nor by-ref variadic.
+                      if ($nextId === $ellipsisId) {
+                          $afterEllipsis = $paramTokens[$pIdx + 2] ?? null;
+                          $afterId = is_array($afterEllipsis) ? $afterEllipsis[0] : null;
+                          if ($afterId === T_VARIABLE) continue;
+                      }
+                      if ($nextId !== T_VARIABLE) {
+                          $errors[] = $path . ': PHP 7.4 incompatibility: intersection type parameter detected';
+                          break;
+                      }
+                  }
               }
               $returnTokens = [];
               $hasColon = false;
-              while ($i < $count && $tokens[$i] !== '{' && $tokens[$i] !== ';') {
+              while ($i < $count && $tokens[$i] !== '{' && $tokens[$i] !== ';' && $tokens[$i] !== $doubleArrowId && (is_array($tokens[$i]) ? $tokens[$i][0] !== $doubleArrowId : true)) {
                   if ($tokens[$i] === ':') {
                       $hasColon = true;
                   } elseif ($hasColon) {
@@ -433,10 +622,73 @@ export async function validatePhpSyntaxTree(dir, { phpBin = process.env.WPDEV_PH
               }
               if ($hasColon) {
                   foreach ($returnTokens as $rt) {
-                      if ($rt === '|') {
+                      $rtId = is_array($rt) ? $rt[0] : null;
+                      $rtText = is_array($rt) ? $rt[1] : $rt;
+                      if ($rtText === '|') {
                           $errors[] = $path . ': PHP 7.4 incompatibility: union return type detected in function declaration';
                           break;
                       }
+                      if ($rtId === T_STRING && in_array(strtolower($rtText), ['mixed', 'never', 'static', 'true', 'false', 'null'], true)) {
+                          $errors[] = $path . ': PHP 7.4 incompatibility: ' . $rtText . ' return type detected in function declaration';
+                          break;
+                      }
+                      if (defined('T_STATIC') && $rtId === constant('T_STATIC')) {
+                          $errors[] = $path . ': PHP 7.4 incompatibility: static return type detected in function declaration';
+                          break;
+                      }
+                      if ($rtText === '&' || (defined('T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG') && $rtId === constant('T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG'))) {
+                          $errors[] = $path . ': PHP 7.4 incompatibility: intersection return type detected in function declaration';
+                          break;
+                      }
+                  }
+              }
+          }
+
+          if ($tokenId === T_CATCH) {
+              $open = $nextSig($tokens, $i, $count);
+              if ($open !== null && $tokens[$open] === '(') {
+                  $hasVar = false;
+                  $j = $open + 1;
+                  $depth = 1;
+                  while ($j < $count && $depth > 0) {
+                      $ct = $tokens[$j];
+                      if ($ct === '(') $depth++;
+                      elseif ($ct === ')') $depth--;
+                      elseif ($depth === 1 && is_array($ct) && $ct[0] === T_VARIABLE) $hasVar = true;
+                      $j++;
+                  }
+                  if (!$hasVar) {
+                      $errors[] = $path . ': PHP 7.4 incompatibility: non-capturing catch detected';
+                      break;
+                  }
+              }
+          }
+
+          if ($tokenId === T_CONST) {
+              $n1 = $nextSig($tokens, $i, $count);
+              if ($n1 !== null && is_array($tokens[$n1]) && $tokens[$n1][0] === T_STRING) {
+                  $n2 = $nextSig($tokens, $n1, $count);
+                  if ($n2 !== null && is_array($tokens[$n2]) && $tokens[$n2][0] === T_STRING) {
+                      $errors[] = $path . ': PHP 7.4 incompatibility: typed class constant detected';
+                      break;
+                  }
+              }
+          }
+
+          // Named arguments 'foo(name: $v)' are PHP 8.0+. A top-level 'Name:'
+          // at the start of a call argument (prev significant '(' or ',',
+          // next significant not ':' to exclude '::') is a named argument.
+          if ($tokenId === T_STRING) {
+              $ni = $nextSig($tokens, $i, $count);
+              if ($ni !== null && $tokens[$ni] === ':') {
+                  $nni = $nextSig($tokens, $ni, $count);
+                  $pi = $prevSig($tokens, $i);
+                  $prevTok = $pi !== null ? $tokens[$pi] : null;
+                  $isScopeOrTernaryQ = ($prevTok === '?' || (is_array($prevTok) && $prevTok[1] === '?'));
+                  if ($nni !== null && $tokens[$nni] !== ':' && (is_array($tokens[$nni]) ? $tokens[$nni][1] !== ':' : true)
+                      && ($prevTok === '(' || $prevTok === ',') && !$isScopeOrTernaryQ) {
+                      $errors[] = $path . ': PHP 7.4 incompatibility: named argument detected: ' . $tokenText;
+                      break;
                   }
               }
           }

@@ -103,7 +103,13 @@ export async function prepareArtifactFixture({
       throw new Error("Fixture extraction aborted before execution");
     }
 
-    await execFileAsync("unzip", ["-q", zipPath, "-d", ownedDir], signal ? { signal } : {});
+    const snapshotPath = path.join(ownedDir, `.snapshot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.zip`);
+    await fs.promises.writeFile(snapshotPath, zipBytes, { flag: "wx", mode: 0o400 });
+    try {
+      await execFileAsync("unzip", ["-q", snapshotPath, "-d", ownedDir], signal ? { signal } : {});
+    } finally {
+      await rm(snapshotPath, { force: true }).catch(() => {});
+    }
 
     const pluginDir = path.join(ownedDir, consumer);
     if (!fs.existsSync(pluginDir)) {

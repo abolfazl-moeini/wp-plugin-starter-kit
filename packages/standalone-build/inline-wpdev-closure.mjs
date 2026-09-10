@@ -186,28 +186,61 @@ const REQUIRED_WPDEV_ASSET_DIRS = [
   "modules/wizard/assets",
 ];
 
-export async function inlineWpdevClosure({ stagingPlugin, consumer, contentRoot, wpdevPluginDirOverride = null }) {
-  const wpdevPluginDir = wpdevPluginDirOverride || path.join(contentRoot, "plugins/wpdev");
-
-  // Decouple main plugin file header for all consumers
-  const mainPhpPath = path.join(stagingPlugin, `${consumer}.php`);
-  if (fs.existsSync(mainPhpPath)) {
-    let mainPhp = await readFile(mainPhpPath, "utf8");
-    mainPhp = mainPhp.replace(/^[ \t]*\*[ \t]*.*Requires Plugins:[ \t]*wpdev.*\r?\n/gim, "");
-    mainPhp = mainPhp.replace(/add_action\(\s*'admin_notices',\s*'[^']+_wpdev_dependency_notice'\s*\);/g, "");
-    
-    // Inject functions-closure loader after vendor_autoload require
-    if (!mainPhp.includes("functions-closure.php")) {
-      mainPhp = mainPhp.replace(
-        /(require_once\s+\$vendor_autoload;\s*\})/s,
-        `$1\nif (file_exists(__DIR__ . '/src/FrameworkClosure/functions-closure.php')) {\n    require_once __DIR__ . '/src/FrameworkClosure/functions-closure.php';\n}`
-      );
+export function removeWpdevPluginRequirement(mainPhp) {
+  return mainPhp.replace(
+    /^([ \t]*\*[ \t]*Requires Plugins:[ \t]*)(.+)$/gim,
+    (match, prefix, pluginsList) => {
+      const plugins = pluginsList
+        .split(",")
+        .map((p) => p.trim())
+        .filter(Boolean);
+      const remaining = plugins.filter((p) => p.toLowerCase() !== "wpdev");
+      if (remaining.length === 0) {
+        return "";
+      }
+      return `${prefix}${remaining.join(", ")}\n`;
     }
-    await writeFile(mainPhpPath, mainPhp, "utf8");
-  }
+  );
+}
 
-  // Only inline runtime closure for consumers that use WPDevFramework
-  const isTargetConsumer = [
+export function injectFunctionsClosureLoader(mainPhp) {
+  if (mainPhp.includes("functions-closure.php")) {
+    return mainPhp;
+  }
+  const loaderSnippet = `\nif (file_exists(__DIR__ . '/src/FrameworkClosure/functions-closure.php')) {\n    require_once __DIR__ . '/src/FrameworkClosure/functions-closure.php';\n}`;
+  if (/(require_once\s+\$vendor_autoload;\s*\})/s.test(mainPhp)) {
+    return mainPhp.replace(/(require_once\s+\$vendor_autoload;\s*\})/s, `$1${loaderSnippet}`);
+  }
+  if (/(require(?:_once)?\s+['"][^'"]*vendor\/autoload\.php['"]\s*;)/.test(mainPhp)) {
+    return mainPhp.replace(/(require(?:_once)?\s+['"][^'"]*vendor\/autoload\.php['"]\s*;)/, `$1${loaderSnippet}`);
+  }
+  if (/(require(?:_once)?\s+\$[^;]*autoload[^;]*;)/.test(mainPhp)) {
+    return mainPhp.replace(/(require(?:_once)?\s+\$[^;]*autoload[^;]*;)/, `$1${loaderSnippet}`);
+  }
+  if (/(defined\s*\(\s*['"]ABSPATH['"]\s*\)\s*\|\|\s*exit\s*;)/i.test(mainPhp)) {
+    return mainPhp.replace(/(defined\s*\(\s*['"]ABSPATH['"]\s*\)\s*\|\|\s*exit\s*;)/i, `$1${loaderSnippet}\n`);
+  }
+  return mainPhp.replace(/(<\?php\s*)/, `$1${loaderSnippet}\n`);
+}
+
+export async function inlineWpdevClosure({
+  stagingPlugin,
+  consumer,
+  contentRoot,
+  wpdevPluginDirOverride = null,
+  sourceComposerModel = null,
+  inlineFramework = null,
+  frameworkProvider = null,
+}) {
+  const wpdevPluginDir = frameworkProvider
+    || wpdevPluginDirOverride
+    || path.join(contentRoot, "plugins/wpdev");
+  const mainPhpPath = path.join(stagingPlugin, `${consumer}.php`);
+  const mainPhpExists = fs.existsSync(mainPhpPath);
+  const mainPhpHeader = mainPhpExists ? await readFile(mainPhpPath, "utf8") : "";
+  const headerRequiresWpdev = /Requires Plugins:.*wpdev/i.test(mainPhpHeader);
+
+  const knownConsumers = [
     "wpdev-crm",
     "wpdev-tickets",
     "tavangary-core",
@@ -215,9 +248,22 @@ export async function inlineWpdevClosure({ stagingPlugin, consumer, contentRoot,
     "drm-connector",
     "wpdev-analytics",
     "wpdev-woo-persian",
-  ].includes(consumer) || wpdevPluginDirOverride !== null;
-  if (!isTargetConsumer || !fs.existsSync(wpdevPluginDir)) {
+  ];
+  const shouldInline = inlineFramework === true
+    || (inlineFramework !== false && (
+      knownConsumers.includes(consumer)
+      || wpdevPluginDirOverride !== null
+      || Boolean(frameworkProvider)
+      || headerRequiresWpdev
+    ));
+
+  if (!shouldInline) {
     return { inlinedFiles: 0 };
+  }
+
+  // Preflight validation: missing required framework provider must fail closed BEFORE touching any headers (R09)
+  if (!fs.existsSync(wpdevPluginDir)) {
+    throw new Error(`Required framework provider directory does not exist: ${wpdevPluginDir}`);
   }
 
   const targetDir = path.join(stagingPlugin, "src/FrameworkClosure");
@@ -266,7 +312,7 @@ export async function inlineWpdevClosure({ stagingPlugin, consumer, contentRoot,
         const full = path.join(curDir, entry.name);
         if (entry.isDirectory()) {
           const lower = entry.name.toLowerCase();
-          if (["dependencies", "tests", "unit-tests", "node_modules", ".git", "vendor"].includes(lower)) {
+          if (["tests", "unit-tests", "node_modules", ".git", "vendor"].includes(lower)) {
             continue;
           }
           await visitDir(full);
@@ -492,7 +538,13 @@ ${phpWrapperScript}
         await normalizeClosureRequires(full);
       } else if (entry.isFile() && entry.name.endsWith(".php") && entry.name !== "functions-closure.php") {
         let content = await readFile(full, "utf8");
-        const replaced = content.replace(/require(?:_once)?\s+[^;]+\/((?:trait|class)-[a-zA-Z0-9_-]+\.php)['"][^;]*;/g, (match, filename) => {
+        const byBasename = new Map();
+        for (const destPath of copiedFiles) {
+          const base = path.basename(destPath);
+          if (!byBasename.has(base)) byBasename.set(base, []);
+          byBasename.get(base).push(destPath);
+        }
+        const replaced = content.replace(/(\brequire(?:_once)?)\s+[^;]+\/((?:trait|class)-[a-zA-Z0-9_-]+\.php)['"][^;]*;/g, (match, keyword, filename) => {
           if (filename === 'class-wp-list-table.php' || match.includes('wp-admin')) {
             return `if (!class_exists('WP_List_Table', false) && defined('ABSPATH')) {
                 if (file_exists(ABSPATH . 'wp-admin/includes/template.php')) {
@@ -506,24 +558,15 @@ ${phpWrapperScript}
                 }
             }`;
           }
-          return `$_req_candidates = [
-              __DIR__ . '/${filename}',
-              dirname(__DIR__) . '/${filename}',
-              dirname(dirname(__DIR__)) . '/${filename}',
-              dirname(dirname(dirname(__DIR__))) . '/${filename}',
-          ];
-          $_found_req = false;
-          foreach ($_req_candidates as $_c) {
-              if (file_exists($_c)) { require_once $_c; $_found_req = true; break; }
+          const dests = byBasename.get(filename) || [];
+          if (dests.length === 1) {
+            const rel = path.relative(path.dirname(full), dests[0]).replace(/\\/g, "/");
+            return `${keyword} __DIR__ . '/${rel}';`;
           }
-          if (!$_found_req) {
-              $_fc_dir = __DIR__;
-              while ($_fc_dir && basename($_fc_dir) !== 'FrameworkClosure' && $_fc_dir !== dirname($_fc_dir)) {
-                  $_fc_dir = dirname($_fc_dir);
-              }
-              $_matches = glob($_fc_dir . '/modules/*/src/**/${filename}') ?: glob($_fc_dir . '/**/${filename}');
-              if (!empty($_matches)) { require_once $_matches[0]; }
-          }`;
+          if (dests.length > 1) {
+            throw new Error(`Ambiguous inlined require '${filename}' in ${full}: ${dests.join(", ")}`);
+          }
+          throw new Error(`Unresolved inlined require '${filename}' in ${full}`);
         });
         if (replaced !== content) {
           await writeFile(full, replaced, "utf8");
@@ -542,7 +585,15 @@ ${phpWrapperScript}
     "wpdev-tickets": "WpdevTickets",
     "wpdev-woo-persian": "WpdevWooPersian",
   };
-  const consumerNs = CONSUMER_NAMESPACES[consumer] || consumer
+  let declaredConsumerNs = null;
+  if (sourceComposerModel?.autoload?.["psr-4"]) {
+    const psr4Keys = Object.keys(sourceComposerModel.autoload["psr-4"]);
+    if (psr4Keys.length > 0) {
+      const firstKey = psr4Keys[0].replace(/\\+$/, "").split("\\")[0];
+      if (firstKey) declaredConsumerNs = firstKey;
+    }
+  }
+  const consumerNs = declaredConsumerNs || CONSUMER_NAMESPACES[consumer] || consumer
     .replace(/[-_]([a-z])/g, (_, c) => c.toUpperCase())
     .replace(/^[a-z]/, c => c.toUpperCase());
 
@@ -766,10 +817,12 @@ if (!function_exists('wpdev_url')) {
 
 if (!function_exists('wpdev_require_public_function')) {
     function wpdev_require_public_function($basename) {
-        $local = __DIR__ . "/functions/{$basename}.php";
-        if (file_exists($local)) {
-            require_once $local;
+        $name = preg_replace('/\\.php$/i', '', (string) $basename);
+        $local = __DIR__ . "/functions/{$name}.php";
+        if (!file_exists($local)) {
+            return false;
         }
+        require_once $local;
         return true;
     }
 }
@@ -778,23 +831,6 @@ if (!function_exists('wpdev_services')) {
     function wpdev_services($id = null) {
         if (class_exists('\\WPDevFramework\\Core\\Service_Registry')) {
             return null === $id ? \\WPDevFramework\\Core\\Service_Registry::all() : \\WPDevFramework\\Core\\Service_Registry::get($id);
-        }
-        return null;
-    }
-}
-
-if (!function_exists('wpdev_register_table')) {
-    function wpdev_register_table($table) {
-        if (class_exists('\\WPDevFramework\\Core\\Table_Registry')) {
-            \\WPDevFramework\\Core\\Table_Registry::register($table);
-        }
-    }
-}
-
-if (!function_exists('wpdev_get_table')) {
-    function wpdev_get_table($name) {
-        if (class_exists('\\WPDevFramework\\Core\\Table_Registry')) {
-            return \\WPDevFramework\\Core\\Table_Registry::get($name);
         }
         return null;
     }
@@ -938,10 +974,7 @@ if (!function_exists('wpdev_boot_closure_lifecycle')) {
 
   // Copy packages/framework/src/ into src/FrameworkClosure/Core/
   const devPackagesSrc = path.join(contentRoot, "plugins", `${consumer}-dev`, "packages/framework/src");
-  const fallbackFrameworkSrc = path.resolve(scriptDir, "../framework/src");
-  const frameworkSrcToCopy = fs.existsSync(devPackagesSrc)
-    ? devPackagesSrc
-    : (fs.existsSync(fallbackFrameworkSrc) ? fallbackFrameworkSrc : null);
+  const frameworkSrcToCopy = fs.existsSync(devPackagesSrc) ? devPackagesSrc : null;
   const coreDestDir = path.join(targetDir, "Core");
   if (frameworkSrcToCopy) {
     await copyDirRecursive(frameworkSrcToCopy, coreDestDir, frameworkSrcToCopy);
@@ -965,8 +998,10 @@ if (!function_exists('wpdev_boot_closure_lifecycle')) {
 
   // Update composer.json in staging to autoload functions-closure.php and Core classes
   const composerJsonPath = path.join(stagingPlugin, "composer.json");
-  let composerData = {};
-  if (fs.existsSync(composerJsonPath)) {
+  let composerData = sourceComposerModel
+    ? JSON.parse(JSON.stringify(sourceComposerModel))
+    : {};
+  if (!sourceComposerModel && fs.existsSync(composerJsonPath)) {
     try {
       composerData = JSON.parse(await readFile(composerJsonPath, "utf8"));
     } catch (err) {
@@ -979,9 +1014,19 @@ if (!function_exists('wpdev_boot_closure_lifecycle')) {
     composerData.autoload.files.unshift("src/FrameworkClosure/functions-closure.php");
   }
   composerData.autoload["psr-4"] = composerData.autoload["psr-4"] || {};
-  composerData.autoload["psr-4"][`${consumerNs}\\\\Core\\\\`] = "src/FrameworkClosure/Core/Core/";
-  composerData.autoload["psr-4"]["WPDev\\\\"] = "src/FrameworkClosure/Core/";
+  const normalizedCoreKey = `${consumerNs}\\Core\\`;
+  composerData.autoload["psr-4"][normalizedCoreKey] = "src/FrameworkClosure/Core/Core/";
+  composerData.autoload["psr-4"]["WPDev\\"] = "src/FrameworkClosure/Core/";
   await writeFile(composerJsonPath, JSON.stringify(composerData, null, 2), "utf8");
+
+  // Decouple main plugin file header and inject closure loader (only after closure files succeed!)
+  if (mainPhpExists) {
+    let mainPhp = await readFile(mainPhpPath, "utf8");
+    mainPhp = removeWpdevPluginRequirement(mainPhp);
+    mainPhp = mainPhp.replace(/add_action\(\s*'admin_notices',\s*'[^']+_wpdev_dependency_notice'\s*\);/g, "");
+    mainPhp = injectFunctionsClosureLoader(mainPhp);
+    await writeFile(mainPhpPath, mainPhp, "utf8");
+  }
 
   return { inlinedFiles: inlinedCount, manifestDigest: manifestData.manifestDigest };
 }
@@ -1122,16 +1167,33 @@ export function assertFrameworkClosureMinifiedAssets(stagingPlugin) {
   return { checked: REQUIRED_FRAMEWORK_CLOSURE_MIN_ASSETS.length };
 }
 
-export async function minifyAssetsInTree(dir, contentRoot = "") {
+export async function minifyAssetsInTree(dir, contentRoot = "", options = {}) {
   let minifiedCount = 0;
   const filesToMinify = [];
 
+  const kitRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
   const baseRoot = contentRoot || process.cwd();
-  const esbuildModulePath = [
-    path.join(baseRoot, "plugins/tavangary-core-dev/node_modules/esbuild/lib/main.js"),
-    path.join(baseRoot, "plugins/wpdev-crm-dev/node_modules/esbuild/lib/main.js"),
-    path.join(baseRoot, "plugins/wpdev-tickets-dev/node_modules/esbuild/lib/main.js"),
-  ].find(p => fs.existsSync(p));
+  const candidateRoots = [
+    options.packageRoot,
+    baseRoot,
+    process.env.WPDEV_CONTENT_ROOT,
+    kitRoot,
+    process.cwd(),
+  ].filter(Boolean);
+  const searched = [];
+
+  let esbuildModulePath = null;
+  for (const root of candidateRoots) {
+    const candidates = [
+      path.join(root, "node_modules/esbuild/lib/main.js"),
+    ];
+    searched.push(...candidates);
+    const found = candidates.find((p) => fs.existsSync(p));
+    if (found) {
+      esbuildModulePath = found;
+      break;
+    }
+  }
 
   let esbuild = null;
   if (esbuildModulePath) {
@@ -1142,14 +1204,21 @@ export async function minifyAssetsInTree(dir, contentRoot = "") {
     }
   }
 
-  const localEsbuildBin = [
-    path.join(baseRoot, "plugins/tavangary-core-dev/node_modules/.bin/esbuild"),
-    path.join(baseRoot, "plugins/wpdev-crm-dev/node_modules/.bin/esbuild"),
-    path.join(baseRoot, "plugins/wpdev-tickets-dev/node_modules/.bin/esbuild"),
-  ].find(p => fs.existsSync(p));
+  let localEsbuildBin = null;
+  for (const root of candidateRoots) {
+    const candidates = [
+      path.join(root, "node_modules/.bin/esbuild"),
+    ];
+    searched.push(...candidates);
+    const found = candidates.find((p) => fs.existsSync(p));
+    if (found) {
+      localEsbuildBin = found;
+      break;
+    }
+  }
 
   if (!esbuild && !localEsbuildBin) {
-    throw new Error(`esbuild binary/module not found in dev plugins node_modules (searched under ${baseRoot})`);
+    throw new Error(`esbuild binary/module not found (searched: ${searched.join(", ")})`);
   }
 
   async function visit(current) {
@@ -1165,7 +1234,7 @@ export async function minifyAssetsInTree(dir, contentRoot = "") {
       }
       if (entry.isFile()) {
         const name = entry.name.toLowerCase();
-        if (name.endsWith(".js") || name.endsWith(".css")) {
+        if ((name.endsWith(".js") || name.endsWith(".css")) && !name.includes(".min.")) {
           filesToMinify.push(full);
         }
       }
@@ -1181,7 +1250,12 @@ export async function minifyAssetsInTree(dir, contentRoot = "") {
         const content = await readFile(file, "utf8");
         try {
           const res = await esbuild.transform(content, { minify: true, loader: ext });
-          await writeFile(file, res.code, "utf8");
+          const name = path.basename(file).toLowerCase();
+          if (name.includes(".min.")) {
+            await writeFile(file, res.code, "utf8");
+          } else {
+            await writeFile(minifiedSiblingPath(file), res.code, "utf8");
+          }
           minifiedCount++;
         } catch (err) {
           throw new Error(`In-process asset minification failed for ${file}:\n${err.message}`);
@@ -1192,11 +1266,12 @@ export async function minifyAssetsInTree(dir, contentRoot = "") {
     await Promise.all(
       filesToMinify.map(async (file) => {
         try {
+          const name = path.basename(file).toLowerCase();
+          const outfile = name.includes(".min.") ? file : minifiedSiblingPath(file);
           await execFileAsync(localEsbuildBin, [
             file,
             "--minify",
-            "--allow-overwrite",
-            `--outfile=${file}`,
+            `--outfile=${outfile}`,
           ]);
           minifiedCount++;
         } catch (err) {
@@ -1213,8 +1288,9 @@ export async function minifyAssetsInTree(dir, contentRoot = "") {
       continue;
     }
     const sibling = minifiedSiblingPath(file);
-    await copyFile(file, sibling);
-    siblingsWritten += 1;
+    if (fs.existsSync(sibling)) {
+      siblingsWritten += 1;
+    }
   }
 
   return {

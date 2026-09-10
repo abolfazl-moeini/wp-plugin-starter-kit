@@ -29,8 +29,8 @@ import {
 } from "./inline-wpdev-closure.mjs";
 import { purgeDevelopmentTree, getRsyncExcludeArgs } from "./dev-purge-policy.mjs";
 import { validateClassCompleteness } from "./class-completeness-gate.mjs";
-import { generateArtifactManifest, normalizeStagingTree, readZipEntries, verifyZipAgainstManifest } from "./canonical-artifact-manifest.mjs";
-import { resolveConsumerSource } from "./target-registry.mjs";
+import { createCanonicalZip, generateArtifactManifest, normalizeStagingTree, readZipEntries, verifyZipAgainstManifest } from "./canonical-artifact-manifest.mjs";
+import { resolveConsumerSource, TARGET_REGISTRY } from "./target-registry.mjs";
 import {
   assertDuckTypedModuleLoaders,
   rewriteModuleLoaderRegisterToDuckTyped,
@@ -49,6 +49,7 @@ import {
   validatePhpSyntaxTree,
 } from "./profile-s-fail-closed.mjs";
 import { resolveContentRoot } from "./resolve-content-root.mjs";
+import { createBuildPlan, resolveArtifactZipName } from "./build-plan.mjs";
 
 const execFileAsync = promisify(execFile);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -109,35 +110,6 @@ async function normalizeTreeTimestampsAndPermissions(dir) {
   await normalizeStagingTree(dir);
 }
 
-async function createCanonicalZip({ sourceRoot, outputZip, rootName }) {
-  const root = path.resolve(sourceRoot);
-  const archive = path.resolve(outputZip);
-  await mkdir(path.dirname(archive), { recursive: true });
-  await rm(archive, { force: true });
-
-  const parentDir = path.dirname(root);
-  const baseName = path.basename(root);
-
-  if (baseName === rootName) {
-    await normalizeTreeTimestampsAndPermissions(root);
-    await execFileAsync("zip", [
-      "-r", "-q", "-X", archive, baseName,
-      "-x", "*/node_modules/*", "*/.git/*", "*/.DS_Store"
-    ], { cwd: parentDir });
-  } else {
-    const tmpStage = await (await import("node:fs/promises")).mkdtemp(path.join(os.tmpdir(), `zip-${rootName}-`));
-    const targetDir = path.join(tmpStage, rootName);
-    await cp(root, targetDir, { recursive: true });
-    await normalizeTreeTimestampsAndPermissions(targetDir);
-    await execFileAsync("zip", [
-      "-r", "-q", "-X", archive, rootName,
-      "-x", "*/node_modules/*", "*/.git/*", "*/.DS_Store"
-    ], { cwd: tmpStage });
-    await rm(tmpStage, { recursive: true, force: true });
-  }
-  return archive;
-}
-
 export function parseAssembleCli(argv = process.argv) {
   const positional = [];
   const args = argv.slice(2);
@@ -150,7 +122,7 @@ export function parseAssembleCli(argv = process.argv) {
     if (arg.startsWith("--")) continue;
     positional.push(arg);
   }
-  const { profile, isObfuscate } = parseClosedProfileFlags(argv);
+  const flags = parseClosedProfileFlags(argv);
   const contentRoot = positional[0]
     ? path.resolve(positional[0])
     : resolveContentRoot({ scriptDir });
@@ -160,27 +132,73 @@ export function parseAssembleCli(argv = process.argv) {
   const pluginsDirArg = pluginsRaw && pluginsRaw !== "null" && pluginsRaw !== "undefined"
     ? path.resolve(pluginsRaw)
     : null;
-  return { contentRoot, consumer, outputDir, pluginsDirArg, isObfuscate, profile };
+  return { contentRoot, consumer, outputDir, pluginsDirArg, ...flags };
 }
 
 export async function assembleProfileSCandidate(options = {}) {
   const parsed = options.consumer
     ? {
-        contentRoot: path.resolve(options.contentRoot),
+        contentRoot: options.contentRoot ? path.resolve(options.contentRoot) : resolveContentRoot({ scriptDir }),
         consumer: options.consumer,
+        sourceRoot: options.sourceRoot ? path.resolve(options.sourceRoot) : null,
         outputDir: path.resolve(options.outputDir),
         pluginsDirArg: options.pluginsDir || options.pluginsDirArg || null,
-        isObfuscate: Boolean(options.isObfuscate ?? options.obfuscate),
-        profile: (options.isObfuscate ?? options.obfuscate) ? "s" : "clean",
+        isObfuscate: options.isObfuscate,
+        obfuscate: options.obfuscate,
+        profile: options.profile || ((options.isObfuscate ?? options.obfuscate) ? "s" : "clean"),
+        inlineFramework: options.inlineFramework,
+        spaghetti: options.spaghetti,
+        minifyAssets: options.minifyAssets,
+        skipZip: options.skipZip,
+        targetPhp: options.targetPhp || options.phpTarget,
+        emitDistDir: options.emitDistDir ?? true,
       }
     : parseAssembleCli(options.argv || process.argv);
-  const { contentRoot, consumer, outputDir, pluginsDirArg, isObfuscate, profile } = parsed;
+  const {
+    contentRoot,
+    consumer,
+    sourceRoot,
+    outputDir,
+    pluginsDirArg,
+    emitDistDir = true,
+  } = parsed;
+  const buildPlan = options.buildPlan || createBuildPlan({
+    consumer,
+    profile: parsed.profile,
+    isObfuscate: parsed.isObfuscate,
+    obfuscate: parsed.obfuscate,
+    inlineFramework: parsed.inlineFramework,
+    spaghetti: parsed.spaghetti,
+    minifyAssets: parsed.minifyAssets,
+    skipZip: parsed.skipZip,
+    targetPhp: parsed.targetPhp,
+    sourceRoot,
+    contentRoot,
+    pluginsDir: pluginsDirArg,
+    frameworkProvider: options.frameworkProvider || parsed.frameworkProvider,
+  });
+  const isObfuscate = buildPlan.capabilities.obfuscate;
+  const profile = buildPlan.capabilities.inlineFramework
+    && buildPlan.capabilities.spaghetti
+    && buildPlan.capabilities.obfuscate
+    ? "s"
+    : (buildPlan.artifactIdentity.capabilityTag === "standalone" || buildPlan.artifactIdentity.capabilityTag === "clean"
+      ? "clean"
+      : buildPlan.artifactIdentity.capabilityTag);
+  const skipZip = Boolean(buildPlan.skipZip || parsed.skipZip || options.skipZip);
   const signal = options.signal;
   const exec = (file, args, extra = {}) => execFileAsync(file, args, signal ? { ...extra, signal } : extra);
   await assertRequiredBuildTools();
 
   console.log("==> 1. Locating plugin development source...");
-  const resolvedSource = await resolveConsumerSource({ contentRoot, consumer, pluginsDir: pluginsDirArg });
+  const resolvedSource = sourceRoot
+    ? {
+        sourceDir: sourceRoot,
+        deployDir: path.join(outputDir, consumer),
+        bootstrapFile: `${consumer}.php`,
+        entry: TARGET_REGISTRY[consumer] || { bootstrapFile: `${consumer}.php` },
+      }
+    : await resolveConsumerSource({ contentRoot, consumer, pluginsDir: pluginsDirArg });
   const devDir = resolvedSource.sourceDir;
 
   const stagingRoot = await (await import("node:fs/promises")).mkdtemp(path.join(os.tmpdir(), `profile-s-${consumer}-`));
@@ -197,13 +215,36 @@ export async function assembleProfileSCandidate(options = {}) {
       `${stagingPlugin}/`
     ]);
 
-    await mkdir(outputDir, { recursive: true });
-    const baselineZip = path.join(outputDir, consumer + "-profile-a.zip");
-    await exec("zip", ["-r", "-q", "-X", baselineZip, consumer], { cwd: stagingRoot });
-    await copyFile(baselineZip, path.join(outputDir, consumer + ".zip"));
-    const profileABytes = await readFile(baselineZip);
-    const profileASha = crypto.createHash("sha256").update(profileABytes).digest("hex");
-    console.log("==> Baseline Profile A candidate verified: " + profileASha);
+    const baselineZip = path.join(stagingRoot, `${consumer}-source-baseline.zip`);
+    await createCanonicalZip({
+      sourceRoot: stagingPlugin,
+      outputZip: baselineZip,
+      rootName: consumer,
+    });
+    const baselineBytes = await readFile(baselineZip);
+    const baselineSha = crypto.createHash("sha256").update(baselineBytes).digest("hex");
+    console.log("==> Source baseline recorded: " + baselineSha);
+
+    // Capture & normalize authoritative source Composer model before dev purge (R01, R13)
+    let sourceComposerModel = null;
+    const sourceCompJsonPath = path.join(devDir, "composer.json");
+    if (fs.existsSync(sourceCompJsonPath)) {
+      try {
+        sourceComposerModel = JSON.parse(await readFile(sourceCompJsonPath, "utf8"));
+      } catch (err) {
+        throw new Error(`Source composer.json is invalid JSON: ${err.message}`);
+      }
+      if (Array.isArray(sourceComposerModel.autoload?.files)) {
+        for (const relFile of sourceComposerModel.autoload.files) {
+          const fileInDev = path.join(devDir, relFile);
+          if (!fs.existsSync(fileInDev)) {
+            throw new Error(
+              `Source composer.json declared autoload file '${relFile}' does not exist in source tree`
+            );
+          }
+        }
+      }
+    }
 
     console.log("==> 3. Purging development documents (.md, dev configs) while preserving LICENSE/NOTICE...");
     await purgeDevelopmentTree(stagingPlugin, consumer);
@@ -211,15 +252,23 @@ export async function assembleProfileSCandidate(options = {}) {
     // Gate: Verify all production classes from devDir/src exist in stagingPlugin/src
     await validateClassCompleteness({ devDir, stagingPlugin, consumer });
 
-    console.log("==> 3b. Inlining proven WPDev runtime closure & decoupling plugin headers...");
-    const inlined = await inlineWpdevClosure({
-      stagingPlugin,
-      consumer,
-      contentRoot,
-      wpdevPluginDirOverride: pluginsDirArg ? path.join(pluginsDirArg, "wpdev") : null,
-    });
-    if (inlined.inlinedFiles > 0) {
-      console.log(`==> Inlined ${inlined.inlinedFiles} WPDev framework files into self-contained staging tree!`);
+    let inlined = { inlinedFiles: 0 };
+    if (buildPlan.capabilities.inlineFramework) {
+      console.log("==> 3b. Inlining proven WPDev runtime closure & decoupling plugin headers...");
+      inlined = await inlineWpdevClosure({
+        stagingPlugin,
+        consumer,
+        contentRoot,
+        wpdevPluginDirOverride: pluginsDirArg ? path.join(pluginsDirArg, "wpdev") : null,
+        sourceComposerModel,
+        inlineFramework: true,
+        frameworkProvider: buildPlan.source.frameworkProvider,
+      });
+      if (inlined.inlinedFiles > 0) {
+        console.log(`==> Inlined ${inlined.inlinedFiles} WPDev framework files into self-contained staging tree!`);
+      }
+    } else {
+      console.log("==> 3b. Skipping framework inlining (inlineFramework=false)");
     }
 
     // 3a. Downgrade all PHP files to PHP 7.4 via Rector (fail-closed for Profile S)
@@ -259,31 +308,40 @@ export async function assembleProfileSCandidate(options = {}) {
     const toolchain = await collectToolchainEvidence({ rectorBin });
     let dynamicEdges = [];
 
-    if (isObfuscate) {
+    const runTransformer = buildPlan.capabilities.obfuscate || buildPlan.capabilities.spaghetti;
+    if (runTransformer) {
       console.log("==> 4. Running Plan 3 Eligibility & Safety Spike on extracted tree...");
       const eligibility = await runPlan3EligibilitySpike({ rootDir: stagingPlugin });
       dynamicEdges = assertEligibilityAllowsObfuscation(eligibility);
       console.log(`==> Eligibility spike passed (${eligibility.eligibleFiles.length} private units eligible, ${dynamicEdges.length} non-critical dynamic edges recorded)`);
 
-      console.log("==> 5. Pre-scanning and applying Plan 3 Enhanced Transformer (Classes mangled, functions mangled, comments stripped)...");
+      console.log("==> 5. Applying Plan 3 transformer (flatten/mangle/strip per BuildPlan)...");
       const transformerScript = path.join(scriptDir, "plan3/transformer.php");
       const mapFile = path.join(stagingRoot, "symbol-map.json");
       const seed = `profile-s-${consumer}-seed`;
+      const flattenFlag = buildPlan.capabilities.spaghetti ? "--flatten=1" : "--flatten=0";
+      const mangleFlag = buildPlan.capabilities.obfuscate ? "--mangle=1" : "--mangle=0";
+      const stripFlag = buildPlan.capabilities.obfuscate ? "--strip-comments=1" : "--strip-comments=0";
 
-      // Phase 1: Pre-scan symbols across untampered tree
       await exec("php", [
         transformerScript,
         "--dump-map",
         stagingPlugin,
         mapFile,
         seed,
+        flattenFlag,
+        mangleFlag,
+        stripFlag,
       ], {
         maxBuffer: 50 * 1024 * 1024,
       });
       const dumpedMap = JSON.parse(await readFile(mapFile, "utf8"));
-      assertSymbolMapHasNoCollisions(dumpedMap);
+      assertSymbolMapHasNoCollisions(dumpedMap, {
+        spaghetti: buildPlan.capabilities.spaghetti,
+        flattenNamespaces: buildPlan.capabilities.spaghetti,
+        buildPlan,
+      });
 
-      // Phase 2: Transform all first-party PHP files using high-speed batch mode
       const mainFile = `${consumer}.php`;
       const expectedPhpFiles = collectFirstPartyPhpFiles(stagingPlugin);
       const { stdout: batchOut } = await exec("php", [
@@ -293,31 +351,42 @@ export async function assembleProfileSCandidate(options = {}) {
         mapFile,
         seed,
         mainFile,
+        flattenFlag,
+        mangleFlag,
+        stripFlag,
       ], {
         maxBuffer: 50 * 1024 * 1024,
       });
       const manifestLog = parseTransformerBatchLog(batchOut, { expectedFiles: expectedPhpFiles });
-      console.log(`==> Transformed ${manifestLog.length} files with complete symbol mangling & comment stripping in batch mode!`);
+      console.log(`==> Transformed ${manifestLog.length} files (flatten=${buildPlan.capabilities.spaghetti} mangle=${buildPlan.capabilities.obfuscate})`);
     } else {
-      console.log("==> 4. [Clean Build] Skipping AST Transformer & Symbol Mangling (Preserving Clean Readable Production Code)");
+      console.log("==> 4. Skipping AST Transformer (spaghetti=false, obfuscate=false)");
     }
 
-    const loaderRewrite = rewriteModuleLoaderRegisterToDuckTyped(stagingPlugin);
-    assertDuckTypedModuleLoaders(stagingPlugin);
-    console.log(
-      `==> 5a. ModuleLoader coexistence gate: ${loaderRewrite.scanned} file(s) scanned, ${loaderRewrite.rewritten} register() hint(s) normalized to object`,
-    );
+    if (buildPlan.capabilities.spaghetti || buildPlan.capabilities.inlineFramework) {
+      const loaderRewrite = rewriteModuleLoaderRegisterToDuckTyped(stagingPlugin);
+      assertDuckTypedModuleLoaders(stagingPlugin);
+      console.log(
+        `==> 5a. ModuleLoader coexistence gate: ${loaderRewrite.scanned} file(s) scanned, ${loaderRewrite.rewritten} register() hint(s) normalized to object`,
+      );
+    }
 
     // Do not wrap ->register() in catch-and-boot: duplicate Help Hub / menu
     // pages are created when Module::boot() runs both from boot_all() and
     // from a Throwable fallback. Late modules boot via ModuleLoader::$booted.
 
-    console.log("==> 5b. Minifying 100% of first-party JS and CSS assets...");
-    const minResult = await minifyAssetsInTree(stagingPlugin, contentRoot);
-    console.log(
-      `==> Minified ${minResult.minifiedAssets} first-party JS/CSS assets in staging (${minResult.minSiblingsWritten || 0} .min siblings)!`,
-    );
-    assertFrameworkClosureMinifiedAssets(stagingPlugin);
+    if (buildPlan.assetPolicy.minifyAssets) {
+      console.log("==> 5b. Minifying first-party JS and CSS assets...");
+      const minResult = await minifyAssetsInTree(stagingPlugin, contentRoot, {
+        packageRoot: starterKitRoot,
+      });
+      console.log(
+        `==> Minified ${minResult.minifiedAssets} first-party JS/CSS assets in staging (${minResult.minSiblingsWritten || 0} .min siblings)!`,
+      );
+      assertFrameworkClosureMinifiedAssets(stagingPlugin);
+    } else {
+      console.log("==> 5b. Skipping asset minification (minifyAssets=false)");
+    }
 
     // Phase 3: Dump optimized autoloader classmap so all mangled classes are registered in Composer classmap
     if (fs.existsSync(path.join(stagingPlugin, "vendor"))) {
@@ -325,10 +394,30 @@ export async function assembleProfileSCandidate(options = {}) {
 
       const stagingCompJson = path.join(stagingPlugin, "composer.json");
       const srcCompJson = devSourceDir ? path.join(devSourceDir, "composer.json") : null;
-      let compData = {};
+      let compData = sourceComposerModel
+        ? JSON.parse(JSON.stringify(sourceComposerModel))
+        : {};
       if (fs.existsSync(stagingCompJson)) {
-        compData = JSON.parse(fs.readFileSync(stagingCompJson, "utf8"));
-      } else if (srcCompJson && fs.existsSync(srcCompJson)) {
+        const stagingData = JSON.parse(fs.readFileSync(stagingCompJson, "utf8"));
+        compData = {
+          ...compData,
+          ...stagingData,
+          autoload: {
+            ...(compData.autoload || {}),
+            ...(stagingData.autoload || {}),
+            files: [
+              ...new Set([
+                ...(compData.autoload?.files || []),
+                ...(stagingData.autoload?.files || []),
+              ]),
+            ],
+            "psr-4": {
+              ...(compData.autoload?.["psr-4"] || {}),
+              ...(stagingData.autoload?.["psr-4"] || {}),
+            },
+          },
+        };
+      } else if (srcCompJson && fs.existsSync(srcCompJson) && !sourceComposerModel) {
         compData = JSON.parse(fs.readFileSync(srcCompJson, "utf8"));
       }
 
@@ -354,6 +443,16 @@ export async function assembleProfileSCandidate(options = {}) {
         }
       }
 
+      // R01 validation: missing declared autoload.files must throw error, never silently filter
+      const finalAutoloadFiles = [];
+      for (const f of discoveredFiles) {
+        if (fs.existsSync(path.join(stagingPlugin, f))) {
+          finalAutoloadFiles.push(f);
+        } else if (compData.autoload?.files?.includes(f)) {
+          throw new Error(`Declared autoload file '${f}' does not exist in staging tree`);
+        }
+      }
+
       const tempComp = {
         ...compData,
         name: compData.name || "release/" + consumer,
@@ -364,13 +463,13 @@ export async function assembleProfileSCandidate(options = {}) {
             ...(compData.autoload?.["psr-4"] || {}),
             "WPDev\\": "src/FrameworkClosure/Core/",
           },
-          "files": Array.from(discoveredFiles).filter(f => fs.existsSync(path.join(stagingPlugin, f)))
+          "files": finalAutoloadFiles
         }
       };
       await writeFile(path.join(stagingPlugin, "composer.json"), JSON.stringify(tempComp, null, 2), "utf8");
       console.log("==> Dumping optimized Composer classmap for mangled symbols...");
       await exec("composer", ["dump-autoload", "--no-dev", "--optimize", "--no-scripts", "--no-plugins"], { cwd: stagingPlugin });
-      await rm(path.join(stagingPlugin, "composer.json"), { force: true });
+      await writeFile(path.join(stagingPlugin, "composer.json"), JSON.stringify(compData, null, 2), "utf8");
 
       const classmapFile = path.join(stagingPlugin, "vendor/composer/autoload_classmap.php");
       const mapFile = path.join(stagingRoot, "symbol-map.json");
@@ -438,64 +537,94 @@ export async function assembleProfileSCandidate(options = {}) {
     await validatePhpSyntaxTree(stagingPlugin);
     console.log("==> PHP syntax check 100% green!");
 
-    console.log("==> 7. Generating canonical artifact manifest (SHA-256 for all production files)...");
+    const manifestProfile = profile === "s" ? "Profile S" : (profile === "clean" ? "clean" : String(buildPlan.artifactIdentity.capabilityTag));
+    console.log(`==> 7. Generating canonical artifact manifest (profile: ${manifestProfile})...`);
     const artifactManifest = await generateArtifactManifest({
       rootDir: stagingPlugin,
       consumer,
-      profile: "Profile S",
+      profile: manifestProfile,
       toolchain,
-      resolvedProfile: profile,
+      resolvedProfile: profile === "s" || profile === "clean" ? profile : "clean",
       obfuscate: isObfuscate,
       dynamicEdges,
+      capabilities: buildPlan.capabilities,
+      planFingerprint: buildPlan.artifactIdentity.fingerprint,
     });
     console.log(`==> Artifact manifest generated: ${artifactManifest.files.length} production files (digest: ${artifactManifest.manifestDigest})`);
 
-    // Signing is deliberately external and may only occur after acceptance.
-    const outputZip = path.join(outputDir, `${consumer}-profile-s.zip`);
-    console.log(`==> 8. Creating canonical Profile S ZIP at: ${outputZip}`);
+    const stagedCandidateZip = path.join(stagingRoot, `${consumer}-candidate.zip`);
+    console.log(`==> 8. Creating canonical staged candidate ZIP at: ${stagedCandidateZip}`);
     await createCanonicalZip({
       sourceRoot: stagingPlugin,
-      outputZip,
+      outputZip: stagedCandidateZip,
       rootName: consumer,
     });
 
-    const zipBytes = await readFile(outputZip);
+    const zipBytes = await readFile(stagedCandidateZip);
     const zipSha256 = crypto.createHash("sha256").update(zipBytes).digest("hex");
-    console.log(`==> Profile S ZIP SHA-256: ${zipSha256}`);
+    console.log(`==> Candidate ZIP SHA-256: ${zipSha256}`);
     assertZipHasNoSecretIntermediates(readZipEntries(zipBytes));
 
     console.log("==> 8b. Verifying packaged ZIP parity against canonical artifact manifest...");
     const zipVerifyReport = await verifyZipAgainstManifest({
-      zipPath: outputZip,
+      zipPath: stagedCandidateZip,
       consumer,
       manifest: artifactManifest,
     });
     if (zipVerifyReport.status !== "valid") {
-      throw new Error(`Packaged Profile S ZIP failed manifest parity verification:\n${JSON.stringify(zipVerifyReport, null, 2)}`);
+      throw new Error(`Packaged candidate ZIP failed manifest parity verification:\n${JSON.stringify(zipVerifyReport, null, 2)}`);
     }
     console.log("==> ZIP manifest parity verified 100% valid (0 missing, 0 unexpected, 0 modified)!");
 
-    // Verify external harness preparation on Profile S
-    console.log("==> 9. Testing external harness preparation gate for Profile S...");
+    // Verify external harness preparation on candidate
+    console.log("==> 9. Testing external harness preparation gate...");
     const harnessRes = await exec(process.execPath, [
       path.join(scriptDir, "prepare-artifact-phpunit-harness.mjs"),
       contentRoot,
       consumer,
-      outputZip,
+      stagedCandidateZip,
       zipSha256,
     ]);
-    console.log("==> Harness preparation gate for Profile S verified:", JSON.parse(harnessRes.stdout).status);
+    console.log("==> Harness preparation gate verified:", JSON.parse(harnessRes.stdout).status);
+
+    // 10. Publication: ONLY publish to outputDir after ALL gates pass!
+    await mkdir(outputDir, { recursive: true });
+    const targetArtifactName = resolveArtifactZipName(buildPlan);
+    const outputZip = path.join(outputDir, targetArtifactName);
+    if (!skipZip) {
+      const tempPublishZip = path.join(outputDir, `.${targetArtifactName}.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+      await copyFile(stagedCandidateZip, tempPublishZip);
+      await fs.promises.rename(tempPublishZip, outputZip);
+      console.log(`==> Published verified candidate to: ${outputZip}`);
+    } else {
+      console.log("==> skipZip: verified candidate ZIP was not published");
+    }
+
+    const targetDir = path.join(outputDir, consumer);
+    if (emitDistDir) {
+      const tempTargetDir = path.join(outputDir, `.${consumer}.dist-tmp-${Date.now()}`);
+      await cp(stagingPlugin, tempTargetDir, { recursive: true });
+      if (fs.existsSync(targetDir)) {
+        await rm(targetDir, { recursive: true, force: true });
+      }
+      await fs.promises.rename(tempTargetDir, targetDir);
+    }
 
     const result = {
       consumer,
-      profile: "Profile S",
+      profile: manifestProfile,
       resolvedProfile: profile,
       obfuscate: isObfuscate,
+      capabilities: buildPlan.capabilities,
+      planFingerprint: buildPlan.artifactIdentity.fingerprint,
       toolchain,
       stage: "feasibility-prototype",
-      inputProfileAZipSha256: profileASha,
-      outputProfileSZipPath: outputZip,
+      inputProfileAZipSha256: baselineSha,
+      sourceBaselineSha256: baselineSha,
+      outputProfileSZipPath: skipZip ? null : outputZip,
       outputProfileSZipSha256: zipSha256,
+      distRoot: targetDir,
+      manifest: artifactManifest,
       signing: "not-performed; external trusted signing required",
       status: "experimental-candidate-assembled",
     };

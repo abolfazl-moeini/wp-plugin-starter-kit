@@ -67,8 +67,8 @@ test("Dependency graph: changing shared plugins/wpdev propagates to all dependen
   const previousCache = {
     _tools: "tools-hash-v1",
     _wpdev: "wpdev-hash-v1",
-    "tavangary-core": "tools-hash-v1:wpdev-hash-v1:core-hash-v1",
-    "wpdev-crm": "tools-hash-v1:wpdev-hash-v1:crm-hash-v1",
+    "tavangary-core": "tools-hash-v1:wpdev-hash-v1:core-hash-v1:profile:clean",
+    "wpdev-crm": "tools-hash-v1:wpdev-hash-v1:crm-hash-v1:profile:clean",
   };
 
   const currentFingerprints = {
@@ -97,8 +97,10 @@ test("Dependency graph: changing only a single consumer only rebuilds that consu
   const previousCache = {
     _tools: "tools-hash-v1",
     _wpdev: "wpdev-hash-v1",
-    "tavangary-core": "tools-hash-v1:wpdev-hash-v1:core-hash-v1",
-    "wpdev-crm": "tools-hash-v1:wpdev-hash-v1:crm-hash-v1",
+    // Composite identity always binds the canonical tier (F05): clean builds
+    // carry an explicit profile:clean segment.
+    "tavangary-core": "tools-hash-v1:wpdev-hash-v1:core-hash-v1:profile:clean",
+    "wpdev-crm": "tools-hash-v1:wpdev-hash-v1:crm-hash-v1:profile:clean",
   };
 
   const currentFingerprints = {

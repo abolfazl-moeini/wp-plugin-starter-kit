@@ -12,7 +12,12 @@ where feature code lives. Paths are relative to a generated plugin root
 
 ## AccessManager (`Support/AccessManager/`)
 
-**Use for:** named feature-level access rules (menus, ajax, REST, CSV, settings).
+**Use for:** named feature-level access rules (menus, ajax, REST, CSV, settings) implementing the **Two-Gate Defense-in-Depth Model**.
+
+| Gate                              | Mechanism                                                            | Purpose                           |
+| --------------------------------- | -------------------------------------------------------------------- | --------------------------------- |
+| **Gate 1 (Native WP Capability)** | `CapabilityPolicy::can()`, `current_user_can()`, `$supported_panels` | Role & capability boundary        |
+| **Gate 2 (Domain Access Policy)** | `UserAccess`, `CapabilityPolicy::access()`, `wpdev_can()`            | Declarative domain business rules |
 
 | Class                 | Role                                                            |
 | --------------------- | --------------------------------------------------------------- |
@@ -23,13 +28,15 @@ where feature code lives. Paths are relative to a generated plugin root
 **Semantics:** multiple `describe('same-id')` → OR groups; chained conditions in
 one group → AND.
 
+**Framework Alignment:** In `wpdev` core, the canonical access subsystem is `packages/access-manager/` (`WPDev\Access\`), integrated with `WPDevFramework\Core\Access\Permission_Registry`, `Access_Policy_Registry`, and facades `wpdev_can()` / `wpdev_require_access()`. The starter kit's `Support/AccessManager/` provides the standalone consumer DSL. When building for WPDev, declare permissions with `wpdev_register_permission()` on `wpdev_load`.
+
 **Feature code location:** `src/Modules/{Name}/Access/{Name}Access.php`
 
 ```php
 final class MyFeatureAccess extends UserAccess
 {
     public const EDIT_ITEMS = 'edit_items';
-    public const CAP_EDIT   = 'edit_posts'; // string for menu / supported_panels
+    public const CAP_EDIT   = 'edit_posts'; // Gate 1 string for menu / supported_panels
 
     protected function describe(BluePrint $bp): void
     {
@@ -37,21 +44,23 @@ final class MyFeatureAccess extends UserAccess
     }
 }
 
-// Runtime
-(new MyFeatureAccess())->have_access(MyFeatureAccess::EDIT_ITEMS);
-CapabilityPolicy::access(new MyFeatureAccess(), MyFeatureAccess::EDIT_ITEMS);
-CapabilityPolicy::rest_access(new MyFeatureAccess(), MyFeatureAccess::EDIT_ITEMS);
+// Runtime: Two-Gate Defense (Gate 1 + Gate 2)
+CapabilityPolicy::can(MyFeatureAccess::CAP_EDIT)
+    && CapabilityPolicy::access(new MyFeatureAccess(), MyFeatureAccess::EDIT_ITEMS);
 ```
 
 **Do**
 
+- ALWAYS enforce the **Two-Gate Defense-in-Depth Model** on privileged and mutating endpoints (Gate 1 native capability + Gate 2 AccessManager policy).
 - ALWAYS add `Access/{Name}Access.php` when the module has admin ajax / REST /
   menu / CSV / settings gates.
 - Expose rule ids and underlying WP cap strings as **class constants**.
 - Unit-test named rules with `$this->login('role')`.
+- When targeting `phpFramework: wpdev`, register permissions with `wpdev_register_permission()` on `wpdev_load`.
 
 **Don’t**
 
+- Rely solely on a single gate (e.g. coarse `manage_options` or unverified policy alone) for critical mutations.
 - Scatter feature-level `current_user_can('manage_*'|'edit_products'|…)` once an
   Access class exists — call `have_access` / `CapabilityPolicy::access`.
 - Put object ownership into BluePrint without a call-site id — keep
@@ -65,14 +74,14 @@ Gold example: `src/Modules/ExampleFeature/Access/FeatureAccess.php`.
 
 ## Auth (`Support/Auth/CapabilityPolicy.php`)
 
-**Use for:** thin bridge between REST/admin and AccessManager or a one-off cap.
+**Use for:** thin bridge between REST/admin and AccessManager or a one-off cap, enforcing Two-Gate defense.
 
-| Method                                         | When                                 |
-| ---------------------------------------------- | ------------------------------------ |
-| `access($qualifier, $id)` / `rest_access(...)` | Preferred — named AccessManager rule |
-| `can($cap)` / `rest_permission($cap)`          | One-off single capability only       |
+| Method                                         | When                                        |
+| ---------------------------------------------- | ------------------------------------------- |
+| `access($qualifier, $id)` / `rest_access(...)` | Preferred — Gate 2 named AccessManager rule |
+| `can($cap)` / `rest_permission($cap)`          | Gate 1 WP capability check                  |
 
-**Don’t** use `read` for mutating endpoints.
+**Don’t** use `read` for mutating endpoints. Always pair with Gate 2 for domain mutations.
 
 ---
 

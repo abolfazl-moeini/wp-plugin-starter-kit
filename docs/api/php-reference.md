@@ -214,12 +214,17 @@ final class CapabilityPolicy
 }
 ```
 
-Prefer `access()` / `rest_access()` with an AccessManager qualifier for
-feature-level gates. Use `can()` only for one-off single-capability checks.
+Supports the **Two-Gate Defense-in-Depth Model**:
+
+- **Gate 1 (Native WP Capability):** Use `can()` / `rest_permission()` for standard WordPress role/capability checks.
+- **Gate 2 (Domain Policy):** Use `access()` / `rest_access()` with an AccessManager qualifier for feature-level domain rules.
+- On mutating or privileged REST endpoints, enforce both Gate 1 and Gate 2.
 
 ---
 
 ## `WPDev\Support\AccessManager`
+
+Declarative domain access control engine (Gate 2). Aligns with canonical `WPDev\Access\` in the `wpdev` core framework (`packages/access-manager`), integrating with `Permission_Registry`, `Access_Policy_Registry`, and `wpdev_can()`.
 
 ### `UserAccess` (abstract)
 

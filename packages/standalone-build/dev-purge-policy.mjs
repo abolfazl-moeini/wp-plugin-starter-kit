@@ -34,6 +34,15 @@ export const VENDOR_DEV_DIRS = new Set([
   "wp-coding-standards",
   "bin",
   "plugin-core-test",
+  "wc-core-test",
+  "framework",
+  "yoast",
+  "sebastian",
+  "phar-io",
+  "theseer",
+  "myclabs",
+  "doctrine",
+  "nikic",
   ".git",
   ".github"
 ]);

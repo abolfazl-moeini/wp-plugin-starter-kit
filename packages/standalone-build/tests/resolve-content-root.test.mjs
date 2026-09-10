@@ -45,7 +45,41 @@ test("resolveContentRoot fails closed when it cannot infer wp-content", () => {
         scriptDir: os.tmpdir(),
         cwd: os.tmpdir(),
         env: {},
+        argv: [],
       }),
     /WPDEV_CONTENT_ROOT/,
   );
 });
+
+test("resolveContentRoot detects parent when cwd is inside plugins subdir", () => {
+  const dir = path.join(os.tmpdir(), `wpdev-wp-plugins-${process.pid}`);
+  const pluginsDir = path.join(dir, "plugins");
+  mkdirSync(pluginsDir, { recursive: true });
+  mkdirSync(path.join(dir, "themes"), { recursive: true });
+  try {
+    assert.equal(
+      resolveContentRoot({ scriptDir: os.tmpdir(), cwd: pluginsDir, env: {}, argv: [] }),
+      path.resolve(dir),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveContentRoot respects --content-root and --plugins-dir in argv", () => {
+  const dir = path.join(os.tmpdir(), `wpdev-argv-root-${process.pid}`);
+  mkdirSync(dir, { recursive: true });
+  try {
+    assert.equal(
+      resolveContentRoot({ scriptDir: os.tmpdir(), cwd: os.tmpdir(), env: {}, argv: [`--content-root=${dir}`] }),
+      path.resolve(dir),
+    );
+    assert.equal(
+      resolveContentRoot({ scriptDir: os.tmpdir(), cwd: os.tmpdir(), env: {}, argv: [`--plugins-dir=${path.join(dir, "plugins")}`] }),
+      path.resolve(dir),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+

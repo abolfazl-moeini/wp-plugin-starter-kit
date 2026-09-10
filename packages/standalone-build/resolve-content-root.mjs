@@ -12,14 +12,40 @@ export function resolveContentRoot({
   scriptDir,
   cwd = process.cwd(),
   env = process.env,
+  argv = process.argv,
 } = {}) {
   const fromEnv = String(env.WPDEV_CONTENT_ROOT || "").trim();
   if (fromEnv) {
     return path.resolve(fromEnv);
   }
 
+  if (Array.isArray(argv)) {
+    for (const arg of argv) {
+      if (typeof arg === "string" && arg.startsWith("--content-root=")) {
+        const val = arg.slice("--content-root=".length).trim();
+        if (val) return path.resolve(val);
+      }
+      if (typeof arg === "string" && arg.startsWith("--plugins-dir=")) {
+        const val = arg.slice("--plugins-dir=".length).trim();
+        if (val) return path.dirname(path.resolve(val));
+      }
+    }
+  }
+
   if (looksLikeWpContent(cwd)) {
     return path.resolve(cwd);
+  }
+
+  // Operator is inside wp-content/plugins
+  const parentOfCwd = path.dirname(cwd);
+  if (looksLikeWpContent(parentOfCwd)) {
+    return path.resolve(parentOfCwd);
+  }
+
+  // Operator is in wordpress root which contains wp-content
+  const childWpContent = path.join(cwd, "wp-content");
+  if (looksLikeWpContent(childWpContent)) {
+    return path.resolve(childWpContent);
   }
 
   if (scriptDir) {

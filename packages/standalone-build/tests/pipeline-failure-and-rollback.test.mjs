@@ -39,6 +39,11 @@ async function createHermeticZipFixture({ tmpDir, consumer }) {
   const pluginSrc = path.join(tmpDir, consumer);
   await fs.promises.mkdir(pluginSrc, { recursive: true });
   await fs.promises.writeFile(path.join(pluginSrc, `${consumer}.php`), "<?php echo 'OK';");
+  await fs.promises.mkdir(path.join(pluginSrc, "src/FrameworkClosure"), { recursive: true });
+  await fs.promises.writeFile(
+    path.join(pluginSrc, "src/FrameworkClosure/functions-closure.php"),
+    "<?php // hermetic framework closure\n"
+  );
   
   const manifest = await generateArtifactManifest({
     rootDir: pluginSrc,
@@ -378,6 +383,8 @@ test("Failure Scenario 7: Production orchestrator rollback on smoke failure leav
       wpdevFingerprint: wpdevSha,
       pluginSourceFingerprint: sourceSha,
       toolchainFingerprint: toolchain,
+      // Hermetic Profile S fixture (F05 tier separation).
+      profile: "s",
     });
     const compositeFp = compRaw;
 
@@ -463,6 +470,8 @@ test("Failure Scenario 7: Production orchestrator rollback on smoke failure leav
         testMode: "docker-smoke",
         shouldDeploy: true,
         injectFailure: "during_smoke",
+        // Fixture ZIPs are Profile S artifacts; run the obfuscated tier (F05).
+        isObfuscate: true,
       });
     } catch (err) {
       threw = true;
@@ -537,6 +546,9 @@ test("Failure Scenario 8: Failure immediately after swap (during_swap) on non-ex
       wpdevFingerprint: fps.wpdev,
       pluginSourceFingerprint: fps.plugins[consumer],
       toolchainFingerprint: fps.toolchain,
+      // Hermetic fixtures below are Profile S artifacts; the tier is part of
+      // the composite identity (F05), so the test pipeline must run obfuscated.
+      profile: "s",
     });
     const requiredTests = REQUIRED_ARTIFACT_TESTS[consumer];
     const testEvidence = {};
@@ -612,6 +624,8 @@ test("Failure Scenario 8: Failure immediately after swap (during_swap) on non-ex
         testMode: "artifact",
         shouldDeploy: true,
         injectFailure: "during_swap",
+        // Fixture ZIPs are Profile S artifacts; run the obfuscated tier (F05).
+        isObfuscate: true,
       });
     } catch (err) {
       threw = true;
@@ -664,6 +678,9 @@ test("Failure Scenario 9: Multi-file commit failure (during_commit) leaves zero 
       wpdevFingerprint: fps.wpdev,
       pluginSourceFingerprint: fps.plugins[consumer],
       toolchainFingerprint: fps.toolchain,
+      // Hermetic fixtures below are Profile S artifacts; the tier is part of
+      // the composite identity (F05), so the test pipeline must run obfuscated.
+      profile: "s",
     });
 
     const requiredTests = REQUIRED_ARTIFACT_TESTS[consumer];
@@ -740,6 +757,8 @@ test("Failure Scenario 9: Multi-file commit failure (during_commit) leaves zero 
         testMode: "artifact",
         shouldDeploy: true,
         injectFailure: "during_commit",
+        // Fixture ZIPs are Profile S artifacts; run the obfuscated tier (F05).
+        isObfuscate: true,
       });
     } catch (err) {
       threw = true;
@@ -840,6 +859,9 @@ test("Failure Scenario 10: Startup journal recovery restores interrupted deploym
       wpdevFingerprint: fps.wpdev,
       pluginSourceFingerprint: fps.plugins[consumer],
       toolchainFingerprint: fps.toolchain,
+      // Hermetic fixtures below are Profile S artifacts; the tier is part of
+      // the composite identity (F05), so the test pipeline must run obfuscated.
+      profile: "s",
     });
 
     const initialCacheData = {
@@ -882,6 +904,8 @@ test("Failure Scenario 10: Startup journal recovery restores interrupted deploym
       targetPlugins: [consumer],
       testMode: "fast",
       jobsLimit: 1,
+      // Recovery fixtures stage Profile S ZIPs; keep the tier consistent (F05).
+      isObfuscate: true,
     });
 
     // Verify that target was restored from backup and journal was removed
@@ -977,6 +1001,9 @@ test("Failure Scenario 11: Crash after backup_renamed but before candidate_swapp
       wpdevFingerprint: fps.wpdev,
       pluginSourceFingerprint: fps.plugins[consumer],
       toolchainFingerprint: fps.toolchain,
+      // Hermetic fixtures below are Profile S artifacts; the tier is part of
+      // the composite identity (F05), so the test pipeline must run obfuscated.
+      profile: "s",
     });
 
     const initialCacheData = {
@@ -1023,6 +1050,8 @@ test("Failure Scenario 11: Crash after backup_renamed but before candidate_swapp
       targetPlugins: [consumer],
       testMode: "fast",
       jobsLimit: 1,
+      // Recovery fixtures stage Profile S ZIPs; keep the tier consistent (F05).
+      isObfuscate: true,
     });
 
     // Target must be restored from backup and staging/backup cleaned up
@@ -2302,6 +2331,7 @@ test("Failure Scenario 32: Multi-target deployment with candidate digest transit
       wpdevFingerprint: fp.wpdev,
       pluginSourceFingerprint: fp.plugins["tavangary-core"],
       toolchainFingerprint: fp.toolchain,
+      profile: "s",
     });
 
     const crmComposite = computePluginCompositeFingerprint({
@@ -2309,6 +2339,7 @@ test("Failure Scenario 32: Multi-target deployment with candidate digest transit
       wpdevFingerprint: fp.wpdev,
       pluginSourceFingerprint: fp.plugins["wpdev-crm"],
       toolchainFingerprint: fp.toolchain,
+      profile: "s",
     });
 
     const themeHash = (fp.theme && fp.theme !== "missing") ? fp.theme : "0".repeat(64);
@@ -2396,6 +2427,8 @@ test("Failure Scenario 32: Multi-target deployment with candidate digest transit
       isForce: false,
       shouldDeploy: true,
       testMode: "affected",
+      // Fixture ZIPs are Profile S artifacts; run the obfuscated tier (F05).
+      isObfuscate: true,
       executor: async () => ({ stdout: "ok 1 - pass\n", stderr: "" }),
     });
 
@@ -2862,6 +2895,7 @@ test("Failure Scenario 39: Docker smoke node fails if any artifact binding is mi
       wpdevFingerprint: fp.wpdev,
       pluginSourceFingerprint: fp.plugins["tavangary-core"],
       toolchainFingerprint: fp.toolchain,
+      profile: "s",
     });
 
     const themeHash = (fp.theme && fp.theme !== "missing") ? fp.theme : "0".repeat(64);
@@ -2912,6 +2946,8 @@ test("Failure Scenario 39: Docker smoke node fails if any artifact binding is mi
           scriptDir: packageRoot,
           testMode: "docker-smoke",
           injectFailure: "during_smoke",
+          // Fixture ZIP is a Profile S artifact; run the obfuscated tier (F05).
+          isObfuscate: true,
           executor: async () => ({ stdout: "ok 1 - pass\n", stderr: "" }),
         });
       },
