@@ -85,6 +85,12 @@ export const CANONICAL_CONSUMERS = new Set([
   "drm-connector",
 ]);
 
+export function registerCanonicalConsumer(slug) {
+  if (slug && typeof slug === "string") {
+    CANONICAL_CONSUMERS.add(slug.trim());
+  }
+}
+
 export function resolveCanonicalAssembler({
   fromDir,
   pluginRoot,
@@ -193,6 +199,10 @@ export function parseArgs(argv) {
       opts.out = arg.slice("--out=".length);
     } else if (typeof arg === "string" && arg.startsWith("--root=")) {
       opts.root = path.resolve(arg.slice("--root=".length));
+    } else if (arg === "--use-canonical-assembler" || arg === "--canonical") {
+      opts.useCanonicalAssembler = true;
+    } else if (arg === "--no-canonical-assembler") {
+      opts.useCanonicalAssembler = false;
     } else if (arg === "--help" || arg === "-h") {
       opts.help = true;
     }
@@ -235,6 +245,7 @@ function readProjectConfig(root) {
         "7.4",
     ),
     configPath,
+    raw,
   };
 }
 
@@ -511,10 +522,27 @@ export async function prepareRelease(options = {}) {
   const isObfuscate = Boolean(options.obfuscate || options.profile === "s");
   const profile = options.profile || (isObfuscate ? "s" : "clean");
 
+  // Preflight validation BEFORE any filesystem mutations or test suites
+  if (isObfuscate && skipRector) {
+    throw new Error("Profile S cannot combine --obfuscate with --skip-rector");
+  }
+  if (
+    options.profile &&
+    options.profile !== "s" &&
+    options.profile !== "clean"
+  ) {
+    throw new Error(`Invalid profile '${options.profile}'. Allowed: s, clean`);
+  }
+  if (options.obfuscate && options.profile === "clean") {
+    throw new Error(
+      "Conflicting profile flags: --obfuscate and --profile=clean",
+    );
+  }
+
   // Gate BEFORE wiping dist so a failed suite leaves an existing package intact.
   gateReleaseTests(root, { skipTests });
 
-  const { slug, phpMinVersion } = readProjectConfig(root);
+  const { slug, phpMinVersion, raw } = readProjectConfig(root);
   const outAbs = path.join(root, outBase);
 
   // Check if this consumer can delegate to canonical standalone assembler
@@ -524,15 +552,20 @@ export async function prepareRelease(options = {}) {
   });
 
   const isRegisteredConsumer = CANONICAL_CONSUMERS.has(slug);
-
-  if (
-    canonicalAssemblerPath &&
+  const shouldDelegateCanonical =
+    Boolean(canonicalAssemblerPath) &&
     options.useCanonicalAssembler !== false &&
-    (isRegisteredConsumer || options.useCanonicalAssembler === true)
-  ) {
-    const { assembleProfileSCandidate } = await import(
-      pathToFileURL(canonicalAssemblerPath).href
-    );
+    (isRegisteredConsumer ||
+      options.useCanonicalAssembler === true ||
+      isObfuscate ||
+      Boolean(raw?.canonicalAssembler || raw?.features?.canonicalAssembler));
+
+  if (shouldDelegateCanonical) {
+    const importUrl =
+      process.env.JEST_WORKER_ID !== undefined
+        ? canonicalAssemblerPath
+        : pathToFileURL(canonicalAssemblerPath).href;
+    const { assembleProfileSCandidate } = await import(importUrl);
     const pluginsDir = path.dirname(root);
     const contentRoot = path.dirname(pluginsDir);
 
@@ -551,14 +584,33 @@ export async function prepareRelease(options = {}) {
       minifyAssets: options.minifyAssets,
       skipZip,
       targetPhp:
-        options.targetPhp || options.phpTarget || phpMinVersion || "7.4",
+        options.targetPhp ||
+        options.phpTarget ||
+        (raw?.features && raw.features.phpMinVersion) ||
+        phpMinVersion ||
+        "7.4",
       phpBin: options.phpBin,
       enforceTargetPhp: options.enforceTargetPhp,
       emitDistDir: true,
-      frozenClasses: options.frozenClasses,
-      frozenFunctions: options.frozenFunctions,
-      frozenConstants: options.frozenConstants,
-      frameworkProvider: options.frameworkProvider,
+      frameworkProvider:
+        options.frameworkProvider ||
+        raw?.frameworkProvider ||
+        raw?.features?.frameworkProvider,
+      frozenClasses: options.frozenClasses || raw?.preservation?.classes,
+      frozenFunctions: options.frozenFunctions || raw?.preservation?.functions,
+      frozenConstants: options.frozenConstants || raw?.preservation?.constants,
+      frozenProperties:
+        options.frozenProperties || raw?.preservation?.properties,
+      frozenMethods: options.frozenMethods || raw?.preservation?.methods,
+      frozenVars:
+        options.frozenVars ||
+        raw?.preservation?.variables ||
+        raw?.preservation?.vars,
+      gettextDomains:
+        options.gettextDomains || raw?.preservation?.gettextDomains,
+      reflectionCallbacks:
+        options.reflectionCallbacks || raw?.preservation?.reflectionCallbacks,
+      buildPlan: options.buildPlan,
     });
 
     const distRoot = path.join(outAbs, slug);
@@ -574,11 +626,7 @@ export async function prepareRelease(options = {}) {
     };
   }
 
-  // Generic release workflow for non-registered plugins
-  if (isObfuscate && skipRector) {
-    throw new Error("Profile S cannot combine --obfuscate with --skip-rector");
-  }
-
+  // Generic release workflow (only when canonical assembler is unavailable or explicitly disabled)
   const distRoot = path.join(outAbs, slug);
 
   if (existsSync(distRoot)) {
@@ -710,6 +758,11 @@ export async function prepareRelease(options = {}) {
     `ok\nphpMinVersion=${phpMinVersion}\n`,
     "utf8",
   );
+
+  const targetZip = path.join(outAbs, `${slug}.zip`);
+  if (skipZip && existsSync(targetZip)) {
+    rmSync(targetZip, { force: true });
+  }
 
   const zipPath = skipZip ? null : await createReleaseZip(outAbs, slug);
 

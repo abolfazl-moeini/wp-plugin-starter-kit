@@ -1790,9 +1790,10 @@ export function createTargetCacheRecord({
   testMode = null,
   testEvidence = null,
   outputPaths = {},
+  skipZip = false,
 }) {
   const artifactIntegrity = gates.artifactIntegrity || {
-    status: zipSha256 && manifestDigest ? "passed" : "pending",
+    status: (skipZip ? manifestDigest : (zipSha256 && manifestDigest)) ? "passed" : "pending",
     verifiedAt: new Date().toISOString(),
   };
 
@@ -1841,6 +1842,7 @@ export function createTargetCacheRecord({
     planFingerprint: planFingerprint || null,
     zipSha256: zipSha256 || "",
     manifestDigest: manifestDigest || "",
+    skipZip: Boolean(skipZip),
     validationState: resolvedValidationState,
     gates: {
       artifactIntegrity,
@@ -1966,6 +1968,8 @@ export async function validateCachedTargetArtifact({
   expectedCompositeFingerprint,
   expectedProfile = null,
   expectedPlanFingerprint = null,
+  distDir = null,
+  skipZip = false,
 }) {
   if (!cacheRecord || typeof cacheRecord !== "object") {
     return { valid: false, reason: "Cache record is missing or invalid object" };
@@ -1998,6 +2002,42 @@ export async function validateCachedTargetArtifact({
     if (recProf && recProf !== normReq) {
       return { valid: false, reason: `Profile mismatch: requested ${normReq}, cache record has ${recProf}` };
     }
+  }
+
+  if (skipZip) {
+    if (cacheRecord.skipZip !== true) {
+      return { valid: false, reason: "Cache record was built with ZIP, but skipZip was requested" };
+    }
+    if (typeof cacheRecord.manifestDigest !== "string" || !/^[a-f0-9]{64}$/.test(cacheRecord.manifestDigest)) {
+      return { valid: false, reason: "Cache record manifestDigest is missing or invalid" };
+    }
+    if (!distDir || !fs.existsSync(distDir)) {
+      return { valid: false, reason: `Directory artifact does not exist at ${distDir}` };
+    }
+    const st = await lstat(distDir);
+    if (!st.isDirectory()) {
+      return { valid: false, reason: `Directory artifact path is not a directory: ${distDir}` };
+    }
+    const manifestPath = path.join(distDir, "release-manifest.json");
+    const altManifestPath = path.join(distDir, "artifact-manifest.json");
+    const manifestFile = fs.existsSync(manifestPath) ? manifestPath : altManifestPath;
+    if (!fs.existsSync(manifestFile)) {
+      return { valid: false, reason: `Manifest file missing in directory artifact at ${distDir}` };
+    }
+    let m;
+    try {
+      m = JSON.parse(await readFile(manifestFile, "utf8"));
+    } catch (e) {
+      return { valid: false, reason: `Failed to parse manifest in directory artifact: ${e.message}` };
+    }
+    if (!m || typeof m !== "object" || m.manifestDigest !== cacheRecord.manifestDigest) {
+      return { valid: false, reason: "Directory artifact manifestDigest does not match cache record" };
+    }
+    return { valid: true, cacheRecord, manifest: m, manifestDigest: m.manifestDigest };
+  }
+
+  if (cacheRecord.skipZip === true) {
+    return { valid: false, reason: "Cache record was built with skipZip, but ZIP artifact was requested" };
   }
 
   if (!cacheRecord.zipSha256 || !fs.existsSync(zipPath)) {

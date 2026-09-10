@@ -873,9 +873,15 @@ export function parsePipelineArgs(argv = process.argv) {
   if (isBuildOnly && shouldDeploy) {
     throw new Error("--build-only cannot be combined with --deploy");
   }
+  if (closedFlags.skipZip && shouldDeploy) {
+    throw new Error("--skip-zip cannot be combined with --deploy: deployment requires ZIP artifacts");
+  }
+  if (closedFlags.skipZip && (shouldTest || testModeExplicit || suite)) {
+    throw new Error("--skip-zip cannot be combined with --test or --test-mode: artifact tests require ZIP packages");
+  }
 
   let testMode = null;
-  if (!isBuildOnly) {
+  if (!isBuildOnly && !closedFlags.skipZip) {
     if (testModeExplicit) testMode = testModeExplicit;
     else if (suite) testMode = suite;
     else if (shouldTest || isChanged || shouldDeploy) testMode = "affected";
@@ -955,6 +961,14 @@ export async function runPipelineOrchestration(options = {}) {
 
   if (activeShouldDeploy && (activeTestMode === "fast" || activeTestMode === null)) {
     throw new Error("Fast test mode or missing test mode does not authorize deployment. Full or affected test suite required.");
+  }
+
+  const activeSkipZip = Boolean(options.skipZip ?? options.parsed?.skipZip);
+  if (activeSkipZip && activeShouldDeploy) {
+    throw new Error("Cannot combine --deploy with --skip-zip: deployment requires ZIP artifacts");
+  }
+  if (activeSkipZip && activeTestMode) {
+    throw new Error(`Cannot combine test mode '${activeTestMode}' with --skip-zip: artifact tests require ZIP packages`);
   }
 
   const startTime = Date.now();
@@ -1358,6 +1372,10 @@ export async function runPipelineOrchestration(options = {}) {
           ? "s"
           : pluginBuildPlan.artifactIdentity.capabilityTag;
         const targetZipPath = path.join(customDistDir, resolveArtifactZipName(pluginBuildPlan));
+        const activeSkipZip = Boolean(pluginBuildPlan.skipZip);
+        if (activeSkipZip && fs.existsSync(targetZipPath)) {
+          await fs.promises.rm(targetZipPath, { force: true });
+        }
 
         const cachedArtifact = cache.artifacts?.[plugin];
         const expectedProfile = activeProfile;
@@ -1368,6 +1386,8 @@ export async function runPipelineOrchestration(options = {}) {
           expectedCompositeFingerprint: pluginPlan.compositeFingerprint,
           expectedProfile,
           expectedPlanFingerprint: pluginBuildPlan.artifactIdentity.fingerprint,
+          distDir: path.join(customDistDir, plugin),
+          skipZip: activeSkipZip,
         });
 
         if (!pluginPlan.shouldRebuild && cacheValidation.valid) {
@@ -1378,8 +1398,10 @@ export async function runPipelineOrchestration(options = {}) {
             artifactId: cachedArtifact.artifactId,
             composite: pluginPlan.compositeFingerprint,
             planFingerprint: cachedArtifact.planFingerprint || pluginBuildPlan.artifactIdentity.fingerprint,
-            zipSha256: cachedArtifact.zipSha256,
+            zipSha256: activeSkipZip ? null : cachedArtifact.zipSha256,
             manifestDigest: cachedArtifact.manifestDigest,
+            distRoot: path.join(customDistDir, plugin),
+            skipZip: activeSkipZip,
           };
         }
 
@@ -1441,8 +1463,10 @@ export async function runPipelineOrchestration(options = {}) {
             plugin,
             artifactId,
             composite: pluginPlan.compositeFingerprint,
+            planFingerprint: pluginBuildPlan.artifactIdentity.fingerprint,
             distRoot: distDir,
             manifestDigest,
+            zipSha256: null,
             skipZip: true,
           };
         }
@@ -1699,11 +1723,12 @@ export async function runPipelineOrchestration(options = {}) {
             toolchainFingerprint: fingerprint.toolchain,
             compositeFingerprint: bRes.composite,
             planFingerprint: bRes.planFingerprint || null,
-            zipSha256: bRes.zipSha256,
+            zipSha256: bRes.zipSha256 || "",
             manifestDigest: bRes.manifestDigest,
+            skipZip: Boolean(bRes.skipZip),
             gates: {
               artifactIntegrity: {
-                status: bRes.zipSha256 && bRes.manifestDigest ? "passed" : "pending",
+                status: (bRes.skipZip ? bRes.manifestDigest : (bRes.zipSha256 && bRes.manifestDigest)) ? "passed" : "pending",
                 verifiedAt: new Date().toISOString(),
               },
               testCoverage: {
