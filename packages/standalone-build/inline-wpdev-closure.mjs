@@ -245,6 +245,69 @@ export function resolveConsumerNamespace({
   throw new Error("Unable to resolve consumer namespace: consumer slug is required");
 }
 
+export function resolveStaticPhpPathExpression(expr, origDir) {
+  if (!expr || typeof expr !== "string" || !origDir) {
+    return null;
+  }
+  let clean = expr.trim();
+  if (clean.startsWith("(") && clean.endsWith(")")) {
+    clean = clean.slice(1, -1).trim();
+  }
+  const parts = [];
+  let current = "";
+  let inQuote = null;
+  for (let i = 0; i < clean.length; i++) {
+    const c = clean[i];
+    if (inQuote) {
+      if (c === inQuote && clean[i - 1] !== "\\") {
+        inQuote = null;
+      }
+      current += c;
+    } else if (c === '"' || c === "'") {
+      inQuote = c;
+      current += c;
+    } else if (c === ".") {
+      parts.push(current.trim());
+      current = "";
+    } else {
+      current += c;
+    }
+  }
+  if (current.trim()) {
+    parts.push(current.trim());
+  }
+
+  let resolved = "";
+  for (const part of parts) {
+    if ((part.startsWith("'") && part.endsWith("'")) || (part.startsWith('"') && part.endsWith('"'))) {
+      const lit = part.slice(1, -1);
+      resolved = path.join(resolved || origDir, lit);
+    } else if (part === "__DIR__") {
+      resolved = origDir;
+    } else if (part === "__FILE__") {
+      resolved = path.join(origDir, "file.php");
+    } else if (/^dirname\s*\(/.test(part)) {
+      let count = 0;
+      let p = part;
+      while (/^dirname\s*\(/.test(p)) {
+        count++;
+        p = p.replace(/^dirname\s*\(\s*/, "").replace(/\s*\)$/, "");
+      }
+      let baseDir = origDir;
+      if (p === "__FILE__") {
+        count--;
+      }
+      for (let k = 0; k < count; k++) {
+        baseDir = path.dirname(baseDir);
+      }
+      resolved = baseDir;
+    } else {
+      return null;
+    }
+  }
+  return resolved ? path.resolve(resolved) : null;
+}
+
 export function removeWpdevPluginRequirement(mainPhp) {
   return mainPhp.replace(
     /^([ \t]*\*[ \t]*Requires Plugins:[ \t]*)(.+)$/gim,
@@ -301,6 +364,7 @@ export async function inlineWpdevClosure({
   stagingPlugin,
   consumer,
   contentRoot,
+  sourceRoot = null,
   wpdevPluginDirOverride = null,
   sourceComposerModel = null,
   inlineFramework = null,
@@ -338,9 +402,17 @@ export async function inlineWpdevClosure({
     return { inlinedFiles: 0 };
   }
 
-  // Preflight validation: missing required framework provider must fail closed BEFORE touching any headers (R09)
+  // Preflight validation: missing required framework provider must fail closed BEFORE touching any headers (R09, V3-10)
   if (!fs.existsSync(wpdevPluginDir)) {
     throw new Error(`Required framework provider directory does not exist: ${wpdevPluginDir}`);
+  }
+  const providerEntries = fs.readdirSync(wpdevPluginDir).filter(e => !e.startsWith("."));
+  if (providerEntries.length === 0) {
+    throw new Error(`Framework provider directory '${wpdevPluginDir}' is empty`);
+  }
+  const hasFrameworkStructure = providerEntries.some(e => ["modules", "packages", "src"].includes(e));
+  if (!hasFrameworkStructure) {
+    throw new Error(`Framework provider directory '${wpdevPluginDir}' is incomplete (missing modules/, packages/, or src/)`);
   }
 
   const targetDir = path.join(stagingPlugin, "src/FrameworkClosure");
@@ -348,6 +420,8 @@ export async function inlineWpdevClosure({
   await mkdir(functionsDir, { recursive: true });
 
   const destinationMap = new Map();
+  const sourceToDestMap = new Map();
+  const destToSourceMap = new Map();
   const inlinedManifest = [];
   let inlinedCount = 0;
   const copiedFiles = [];
@@ -369,6 +443,8 @@ export async function inlineWpdevClosure({
     await mkdir(path.dirname(destPath), { recursive: true });
     await writeFile(destPath, bytes);
     destinationMap.set(destPath, { sourcePath: srcPath, sha256 });
+    sourceToDestMap.set(path.resolve(srcPath), path.resolve(destPath));
+    destToSourceMap.set(path.resolve(destPath), path.resolve(srcPath));
     inlinedManifest.push({
       source: path.relative(wpdevPluginDir, srcPath).replace(/\\/g, "/"),
       destination: path.relative(stagingPlugin, destPath).replace(/\\/g, "/"),
@@ -615,36 +691,54 @@ ${phpWrapperScript}
         await normalizeClosureRequires(full);
       } else if (entry.isFile() && entry.name.endsWith(".php") && entry.name !== "functions-closure.php") {
         let content = await readFile(full, "utf8");
-        const byBasename = new Map();
-        for (const destPath of copiedFiles) {
-          const base = path.basename(destPath);
-          if (!byBasename.has(base)) byBasename.set(base, []);
-          byBasename.get(base).push(destPath);
-        }
-        const replaced = content.replace(/(\brequire(?:_once)?)\s+[^;]+\/((?:trait|class)-[a-zA-Z0-9_-]+\.php)['"][^;]*;/g, (match, keyword, filename) => {
-          if (filename === 'class-wp-list-table.php' || match.includes('wp-admin')) {
-            return `if (!class_exists('WP_List_Table', false) && defined('ABSPATH')) {
-                if (file_exists(ABSPATH . 'wp-admin/includes/template.php')) {
-                    require_once ABSPATH . 'wp-admin/includes/template.php';
-                }
-                if (file_exists(ABSPATH . 'wp-admin/includes/screen.php')) {
-                    require_once ABSPATH . 'wp-admin/includes/screen.php';
-                }
-                if (file_exists(ABSPATH . 'wp-admin/includes/class-wp-list-table.php')) {
-                    require_once ABSPATH . 'wp-admin/includes/class-wp-list-table.php';
-                }
-            }`;
+        const originalSrc = destToSourceMap.get(path.resolve(full));
+        const origDir = originalSrc ? path.dirname(originalSrc) : null;
+
+        const replaced = content.replace(
+          /(\b(?:require_once|require|include_once|include)\b)\s*\(?([^;]+?)\)?\s*;/g,
+          (match, keyword, expr) => {
+            if (expr.includes("class-wp-list-table.php") || match.includes("wp-admin")) {
+              return `if (!class_exists('WP_List_Table', false) && defined('ABSPATH')) {
+                  if (file_exists(ABSPATH . 'wp-admin/includes/template.php')) {
+                      require_once ABSPATH . 'wp-admin/includes/template.php';
+                  }
+                  if (file_exists(ABSPATH . 'wp-admin/includes/screen.php')) {
+                      require_once ABSPATH . 'wp-admin/includes/screen.php';
+                  }
+                  if (file_exists(ABSPATH . 'wp-admin/includes/class-wp-list-table.php')) {
+                      require_once ABSPATH . 'wp-admin/includes/class-wp-list-table.php';
+                  }
+              }`;
+            }
+
+            if (!origDir) {
+              return match;
+            }
+
+            const targetSrcPath = resolveStaticPhpPathExpression(expr, origDir);
+            if (!targetSrcPath) {
+              return match;
+            }
+
+            const targetDest = sourceToDestMap.get(path.resolve(targetSrcPath));
+            if (targetDest) {
+              const rel = path.relative(path.dirname(full), targetDest).replace(/\\/g, "/");
+              return `${keyword} __DIR__ . '/${rel}';`;
+            }
+
+            // If target path was within wpdevPluginDir or sourceRoot, it was an expected inlined dependency
+            const isInternalFramework = wpdevPluginDir && targetSrcPath.startsWith(path.resolve(wpdevPluginDir));
+            const isInternalSource = sourceRoot && targetSrcPath.startsWith(path.resolve(sourceRoot));
+            const isLocalRelative = originalSrc && targetSrcPath.startsWith(path.dirname(originalSrc));
+            if (isInternalFramework || isInternalSource || isLocalRelative) {
+              if (!fs.existsSync(targetSrcPath)) {
+                throw new Error(`Missing required inlined path '${targetSrcPath}' referenced in ${full}`);
+              }
+            }
+
+            return match;
           }
-          const dests = byBasename.get(filename) || [];
-          if (dests.length === 1) {
-            const rel = path.relative(path.dirname(full), dests[0]).replace(/\\/g, "/");
-            return `${keyword} __DIR__ . '/${rel}';`;
-          }
-          if (dests.length > 1) {
-            throw new Error(`Ambiguous inlined require '${filename}' in ${full}: ${dests.join(", ")}`);
-          }
-          throw new Error(`Unresolved inlined require '${filename}' in ${full}`);
-        });
+        );
         if (replaced !== content) {
           await writeFile(full, replaced, "utf8");
         }
@@ -1036,10 +1130,24 @@ if (!function_exists('wpdev_boot_closure_lifecycle')) {
 
   // Copy packages/framework/src/ into src/FrameworkClosure/Core/
   const devPackagesSrc = path.join(contentRoot, "plugins", `${consumer}-dev`, "packages/framework/src");
-  const frameworkSrcToCopy = fs.existsSync(devPackagesSrc) ? devPackagesSrc : null;
+  const coreCandidates = [
+    sourceRoot ? path.join(sourceRoot, "packages/framework/src") : null,
+    sourceRoot ? path.join(sourceRoot, "src/Core") : null,
+    devPackagesSrc,
+    path.join(wpdevPluginDir, "packages/framework/src"),
+    path.join(wpdevPluginDir, "src/Core"),
+    path.join(wpdevPluginDir, "modules/core/src"),
+  ].filter(Boolean);
+  const frameworkSrcToCopy = coreCandidates.find((d) => fs.existsSync(d)) || null;
   const coreDestDir = path.join(targetDir, "Core");
   if (frameworkSrcToCopy) {
     await copyDirRecursive(frameworkSrcToCopy, coreDestDir, frameworkSrcToCopy);
+  }
+
+  if (inlinedCount === 0) {
+    throw new Error(
+      `Framework provider '${wpdevPluginDir}' yielded 0 inlined files for consumer '${consumer}'`
+    );
   }
 
   // Scope framework core to consumer namespace

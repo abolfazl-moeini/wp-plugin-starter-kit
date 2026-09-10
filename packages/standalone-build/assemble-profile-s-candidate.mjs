@@ -284,6 +284,7 @@ export async function assembleProfileSCandidate(options = {}) {
         stagingPlugin,
         consumer,
         contentRoot,
+        sourceRoot: devDir,
         wpdevPluginDirOverride: pluginsDirArg ? path.join(pluginsDirArg, "wpdev") : null,
         sourceComposerModel,
         inlineFramework: true,

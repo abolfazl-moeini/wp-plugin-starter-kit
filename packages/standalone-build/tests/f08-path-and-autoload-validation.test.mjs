@@ -15,6 +15,7 @@ import {
   inlineWpdevClosure,
   removeWpdevPluginRequirement,
   resolveConsumerNamespace,
+  resolveStaticPhpPathExpression,
 } from "../inline-wpdev-closure.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -561,4 +562,177 @@ echo $legacy->ping();
     await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
 });
+
+test("V3-11: resolveStaticPhpPathExpression accurately resolves static PHP includes", () => {
+  const baseDir = "/test/root/modules/admin/src";
+  assert.equal(
+    resolveStaticPhpPathExpression("__DIR__ . '/sub/target.php'", baseDir),
+    "/test/root/modules/admin/src/sub/target.php"
+  );
+  assert.equal(
+    resolveStaticPhpPathExpression("dirname(__DIR__) . '/class-registry.php'", baseDir),
+    "/test/root/modules/admin/class-registry.php"
+  );
+  assert.equal(
+    resolveStaticPhpPathExpression("dirname( dirname( dirname( __DIR__ ) ) ) . '/other/trait.php'", baseDir),
+    "/test/root/other/trait.php"
+  );
+  assert.equal(
+    resolveStaticPhpPathExpression("dirname(__FILE__) . '/helper.php'", baseDir),
+    "/test/root/modules/admin/src/helper.php"
+  );
+});
+
+test("V3-10: Empty or incomplete framework provider fails closed before mutating headers", async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "f08-v3-10-"));
+  try {
+    const stagingPlugin = path.join(tmpDir, "sample-plugin");
+    await mkdir(stagingPlugin, { recursive: true });
+    const originalHeader = `<?php
+/**
+ * Plugin Name: Sample Plugin
+ * Requires Plugins: wpdev, woocommerce
+ */
+`;
+    await writeFile(path.join(stagingPlugin, "sample-plugin.php"), originalHeader, "utf8");
+
+    // 1. Completely empty directory
+    const emptyProvider = path.join(tmpDir, "empty-wpdev");
+    await mkdir(emptyProvider, { recursive: true });
+    await assert.rejects(
+      inlineWpdevClosure({
+        stagingPlugin,
+        consumer: "sample-plugin",
+        contentRoot: tmpDir,
+        wpdevPluginDirOverride: emptyProvider,
+      }),
+      /Framework provider directory '.*' is empty/
+    );
+    assert.equal(
+      await readFile(path.join(stagingPlugin, "sample-plugin.php"), "utf8"),
+      originalHeader,
+      "Headers must remain untouched on empty provider failure"
+    );
+
+    // 2. Directory missing modules/, packages/, or src/ structure
+    const incompleteProvider = path.join(tmpDir, "incomplete-wpdev");
+    await mkdir(incompleteProvider, { recursive: true });
+    await writeFile(path.join(incompleteProvider, "readme.txt"), "hello", "utf8");
+    await assert.rejects(
+      inlineWpdevClosure({
+        stagingPlugin,
+        consumer: "sample-plugin",
+        contentRoot: tmpDir,
+        wpdevPluginDirOverride: incompleteProvider,
+      }),
+      /is incomplete \(missing modules\/, packages\/, or src\/\)/
+    );
+    assert.equal(
+      await readFile(path.join(stagingPlugin, "sample-plugin.php"), "utf8"),
+      originalHeader,
+      "Headers must remain untouched on incomplete provider failure"
+    );
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test("V3-11: Duplicate basenames resolve accurately and missing includes fail closed", async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "f08-v3-11-"));
+  try {
+    const fakeFramework = path.join(tmpDir, "fake-wpdev");
+    await mkdir(path.join(fakeFramework, "modules/core/src/sub"), { recursive: true });
+
+    // Target 1: modules/core/src/class-target.php
+    await writeFile(
+      path.join(fakeFramework, "modules/core/src/class-target.php"),
+      `<?php namespace WPDevFramework\\Core; class TargetRoot {}\n`,
+      "utf8"
+    );
+
+    // Target 2: modules/core/src/sub/class-target.php (same basename!)
+    await writeFile(
+      path.join(fakeFramework, "modules/core/src/sub/class-target.php"),
+      `<?php namespace WPDevFramework\\Core\\Sub; class TargetSub {}\n`,
+      "utf8"
+    );
+
+    // Caller 1: requires sub/class-target.php
+    await writeFile(
+      path.join(fakeFramework, "modules/core/src/class-caller.php"),
+      `<?php
+namespace WPDevFramework\\Core;
+require_once __DIR__ . '/sub/class-target.php';
+class Caller {}
+`,
+      "utf8"
+    );
+
+    // Staging plugin setup
+    const stagingPlugin = path.join(tmpDir, "sample-plugin");
+    await mkdir(stagingPlugin, { recursive: true });
+    await writeFile(
+      path.join(stagingPlugin, "sample-plugin.php"),
+      `<?php
+/**
+ * Plugin Name: Sample Plugin
+ * Requires Plugins: wpdev
+ */
+`,
+      "utf8"
+    );
+
+    // Run inlining - should NOT throw ambiguity error for duplicate basenames
+    const res = await inlineWpdevClosure({
+      stagingPlugin,
+      consumer: "sample-plugin",
+      contentRoot: tmpDir,
+      wpdevPluginDirOverride: fakeFramework,
+    });
+    assert.ok(res.inlinedFiles > 0);
+
+    // Check rewritten class-caller.php points to sub/class-target.php, NOT class-target.php
+    const rewrittenCaller = await readFile(
+      path.join(stagingPlugin, "src/FrameworkClosure/modules/core/src/class-caller.php"),
+      "utf8"
+    );
+    assert.match(rewrittenCaller, /require_once __DIR__ \. '\/sub\/class-target\.php';/);
+
+    // Now test missing include path fails closed rather than redirecting to sibling basename
+    await writeFile(
+      path.join(fakeFramework, "modules/core/src/class-broken.php"),
+      `<?php
+namespace WPDevFramework\\Core;
+require_once __DIR__ . '/missing/class-target.php';
+`,
+      "utf8"
+    );
+
+    const brokenStaging = path.join(tmpDir, "broken-plugin");
+    await mkdir(brokenStaging, { recursive: true });
+    await writeFile(
+      path.join(brokenStaging, "broken-plugin.php"),
+      `<?php
+/**
+ * Plugin Name: Broken Plugin
+ * Requires Plugins: wpdev
+ */
+`,
+      "utf8"
+    );
+
+    await assert.rejects(
+      inlineWpdevClosure({
+        stagingPlugin: brokenStaging,
+        consumer: "broken-plugin",
+        contentRoot: tmpDir,
+        wpdevPluginDirOverride: fakeFramework,
+      }),
+      /Missing required inlined path '.*missing\/class-target\.php'/
+    );
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
 
