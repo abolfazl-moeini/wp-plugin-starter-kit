@@ -32,6 +32,8 @@ class Plan3_Scope {
 	public $preserved_vars = array(); // '$var' => true or '*' => true
 	public $var_nodes = array();     // offset => '$var'
 	public $compact_calls = array(); // offset => Node
+	public $params = array();        // '$var' => true
+	public $unset_vars = array();    // '$var' => true
 	public $start_pos = 0;
 	public $end_pos = 0;
 
@@ -63,6 +65,7 @@ class Plan3_Symbol_Analyzer {
 	public $project_global_vars = array();
 	public $file_var_decisions = array();
 	public $file_compact_decisions = array();
+	public $serialized_classes = array();
 	public $unsupported_dynamic_cases = array();
 
 	public static $reserved_vars = array(
@@ -182,11 +185,27 @@ class Plan3_Symbol_Analyzer {
 				private $file_path;
 				private $class_stack  = array();
 				private $method_stack = array();
-				private $param_types  = array();
+				private $param_types_stack = array();
 				private $file_scope;
 				private $current_scope;
 				private $next_scope_id = 0;
 				private $all_file_scopes = array();
+
+				protected function extract_compact_vars( $argNode, &$vars, &$all_resolvable ) {
+					if ( $argNode instanceof Node\Scalar\String_ ) {
+						$vars[] = '$' . $argNode->value;
+					} elseif ( $argNode instanceof Node\Expr\Array_ ) {
+						foreach ( $argNode->items as $item ) {
+							if ( $item !== null && $item->value instanceof Node\Expr ) {
+								$this->extract_compact_vars( $item->value, $vars, $all_resolvable );
+							} else {
+								$all_resolvable = false;
+							}
+						}
+					} else {
+						$all_resolvable = false;
+					}
+				}
 
 				public function __construct( $analyzer, $file_path ) {
 					$this->analyzer  = $analyzer;
@@ -240,8 +259,19 @@ class Plan3_Symbol_Analyzer {
 									foreach ( $stmt->traits as $t ) {
 										$traits[] = $t->toString();
 									}
+									if ( ! empty( $stmt->adaptations ) ) {
+										foreach ( $stmt->adaptations as $adaptation ) {
+											if ( isset( $adaptation->method ) && $adaptation->method instanceof Node\Identifier ) {
+												$ad_method = strtolower( $adaptation->method->toString() );
+												$this->analyzer->preserved_members[ $fqcn ]['methods'][ $ad_method ] = 'trait_adaptation';
+												foreach ( $stmt->traits as $t ) {
+													$this->analyzer->preserved_members[ $t->toString() ]['methods'][ $ad_method ] = 'trait_adaptation';
+												}
+											}
+										}
+									}
 								} elseif ( $stmt instanceof Node\Stmt\ClassMethod ) {
-									$m_name = $stmt->name->toString();
+									$m_name = strtolower( $stmt->name->toString() );
 									$vis    = $stmt->isPrivate() ? 'private' : ( $stmt->isProtected() ? 'protected' : 'public' );
 									$methods[ $m_name ] = array(
 										'visibility' => $vis,
@@ -284,10 +314,17 @@ class Plan3_Symbol_Analyzer {
 							'properties' => $properties,
 							'constants'  => $constants,
 						);
+						if ( isset( $methods['__sleep'] ) || isset( $methods['__wakeup'] ) || isset( $methods['__serialize'] ) || isset( $methods['__unserialize'] ) ) {
+							$this->analyzer->serialized_classes[ $fqcn ] = true;
+						}
 						$this->class_stack[] = $fqcn;
 					} elseif ( $node instanceof Node\Stmt\ClassMethod ) {
-						$m_name = $node->name->toString();
+						$m_name = strtolower( $node->name->toString() );
 						$this->method_stack[] = $m_name;
+					}
+
+					// Param types stack & Scope hierarchy
+					if ( $node instanceof Node\Stmt\Function_ || $node instanceof Node\Stmt\ClassMethod || $node instanceof Node\Expr\Closure || $node instanceof Node\Expr\ArrowFunction ) {
 						$types = array();
 						foreach ( $node->params as $param ) {
 							if ( $param->type instanceof Node\Name ) {
@@ -297,15 +334,24 @@ class Plan3_Symbol_Analyzer {
 								}
 							}
 						}
-						$this->param_types = $types;
+						$this->param_types_stack[] = $types;
 					}
 
-					// Scope hierarchy
+					if ( $node instanceof Node\Expr\Assign ) {
+						if ( $node->var instanceof Node\Expr\Variable && is_string( $node->var->name ) ) {
+							$top = count( $this->param_types_stack ) - 1;
+							if ( $top >= 0 && isset( $this->param_types_stack[ $top ][ $node->var->name ] ) ) {
+								unset( $this->param_types_stack[ $top ][ $node->var->name ] );
+							}
+						}
+					}
+
 					if ( $node instanceof Node\Stmt\Function_ ) {
 						$scope = new Plan3_Scope( $this->next_scope_id++, 'function', $this->current_scope, $node->getStartFilePos(), $node->getEndFilePos() );
 						foreach ( $node->params as $param ) {
 							if ( $param->var instanceof Node\Expr\Variable && is_string( $param->var->name ) ) {
 								$p_name = '$' . $param->var->name;
+								$scope->params[ $p_name ] = true;
 								$scope->declared_vars[ $p_name ] = true;
 								$scope->preserved_vars[ $p_name ] = true;
 							}
@@ -317,6 +363,7 @@ class Plan3_Symbol_Analyzer {
 						foreach ( $node->params as $param ) {
 							if ( $param->var instanceof Node\Expr\Variable && is_string( $param->var->name ) ) {
 								$p_name = '$' . $param->var->name;
+								$scope->params[ $p_name ] = true;
 								$scope->declared_vars[ $p_name ] = true;
 								$scope->preserved_vars[ $p_name ] = true;
 							}
@@ -328,6 +375,7 @@ class Plan3_Symbol_Analyzer {
 						foreach ( $node->params as $param ) {
 							if ( $param->var instanceof Node\Expr\Variable && is_string( $param->var->name ) ) {
 								$p_name = '$' . $param->var->name;
+								$scope->params[ $p_name ] = true;
 								$scope->declared_vars[ $p_name ] = true;
 								$scope->preserved_vars[ $p_name ] = true;
 							}
@@ -349,12 +397,21 @@ class Plan3_Symbol_Analyzer {
 						foreach ( $node->params as $param ) {
 							if ( $param->var instanceof Node\Expr\Variable && is_string( $param->var->name ) ) {
 								$p_name = '$' . $param->var->name;
+								$scope->params[ $p_name ] = true;
 								$scope->declared_vars[ $p_name ] = true;
 								$scope->preserved_vars[ $p_name ] = true;
 							}
 						}
 						$this->current_scope = $scope;
 						$this->all_file_scopes[] = $scope;
+					}
+
+					if ( $node instanceof Node\Stmt\Unset_ ) {
+						foreach ( $node->vars as $u_var ) {
+							if ( $u_var instanceof Node\Expr\Variable && is_string( $u_var->name ) ) {
+								$this->current_scope->unset_vars[ '$' . $u_var->name ] = true;
+							}
+						}
 					}
 
 					// Dynamic Scope Triggers
@@ -368,6 +425,12 @@ class Plan3_Symbol_Analyzer {
 							$this->current_scope->dynamic_reasons[] = 'get_defined_vars';
 						} elseif ( $fn_name === 'compact' ) {
 							$this->current_scope->compact_calls[ $node->getStartFilePos() ] = $node;
+						} elseif ( ( $fn_name === 'serialize' || $fn_name === 'unserialize' ) && ! empty( $node->args ) ) {
+							$arg0 = $node->args[0] instanceof Node\Arg ? $node->args[0]->value : $node->args[0];
+							if ( $arg0 instanceof Node\Expr\New_ && $arg0->class instanceof Node\Name ) {
+								$ser_class = $arg0->class->toString();
+								$this->analyzer->serialized_classes[ $ser_class ] = true;
+							}
 						}
 					}
 
@@ -415,66 +478,98 @@ class Plan3_Symbol_Analyzer {
 					$current_method = ! empty( $this->method_stack ) ? end( $this->method_stack ) : null;
 
 					if ( $current_class !== null ) {
-						if ( ( $node instanceof Node\Expr\MethodCall || $node instanceof Node\Expr\NullsafeMethodCall ) && $node->name instanceof Node\Identifier ) {
-							$name    = $node->name->toString();
+						$curr_param_types = ! empty( $this->param_types_stack ) ? end( $this->param_types_stack ) : array();
+
+						if ( $node instanceof Node\Expr\MethodCall || $node instanceof Node\Expr\NullsafeMethodCall ) {
 							$is_this = ( $node->var instanceof Node\Expr\Variable && $node->var->name === 'this' );
-							$receiver = null;
-							if ( $is_this ) {
-								$receiver = $current_class;
-							} elseif ( $node->var instanceof Node\Expr\Variable && is_string( $node->var->name ) && isset( $this->param_types[ $node->var->name ] ) ) {
-								$receiver = $this->param_types[ $node->var->name ];
-							} elseif ( $node->var instanceof Node\Expr\New_ && $node->var->class instanceof Node\Name ) {
-								$receiver = $node->var->class->toString();
-							}
-							$this->analyzer->accesses[] = array(
-								'kind'         => 'method',
-								'name'         => $name,
-								'resolved'     => ( $receiver !== null ),
-								'receiver'     => $receiver,
-								'callerClass'  => $current_class,
-								'callerMethod' => $current_method,
-								'file'         => $this->file_path,
-								'line'         => $node->getStartLine(),
-								'offset'       => $node->name->getStartFilePos(),
-							);
-						} elseif ( ( $node instanceof Node\Expr\PropertyFetch || $node instanceof Node\Expr\NullsafePropertyFetch ) && $node->name instanceof Node\Identifier ) {
-							$name    = $node->name->toString();
-							$is_this = ( $node->var instanceof Node\Expr\Variable && $node->var->name === 'this' );
-							$receiver = null;
-							if ( $is_this ) {
-								$receiver = $current_class;
-							} elseif ( $node->var instanceof Node\Expr\Variable && is_string( $node->var->name ) && isset( $this->param_types[ $node->var->name ] ) ) {
-								$receiver = $this->param_types[ $node->var->name ];
-							}
-							$this->analyzer->accesses[] = array(
-								'kind'         => 'property',
-								'name'         => $name,
-								'resolved'     => ( $receiver !== null ),
-								'receiver'     => $receiver,
-								'callerClass'  => $current_class,
-								'callerMethod' => $current_method,
-								'file'         => $this->file_path,
-								'line'         => $node->getStartLine(),
-								'offset'       => $node->name->getStartFilePos(),
-							);
-						} elseif ( $node instanceof Node\Expr\Array_ && count( $node->items ) === 2 ) {
-							$item0 = isset( $node->items[0] ) && $node->items[0] ? $node->items[0]->value : null;
-							$item1 = isset( $node->items[1] ) && $node->items[1] ? $node->items[1]->value : null;
-							if ( $item0 instanceof Node\Expr\Variable && $item0->name === 'this' && $item1 instanceof Node\Scalar\String_ ) {
+							if ( $node->name instanceof Node\Identifier ) {
+								$name    = strtolower( $node->name->toString() );
+								$receiver = null;
+								if ( $is_this ) {
+									$receiver = $current_class;
+								} elseif ( $node->var instanceof Node\Expr\Variable && is_string( $node->var->name ) && isset( $curr_param_types[ $node->var->name ] ) ) {
+									$receiver = $curr_param_types[ $node->var->name ];
+								} elseif ( $node->var instanceof Node\Expr\New_ && $node->var->class instanceof Node\Name ) {
+									$receiver = $node->var->class->toString();
+								}
 								$this->analyzer->accesses[] = array(
 									'kind'         => 'method',
-									'name'         => $item1->value,
-									'resolved'     => true,
-									'receiver'     => $current_class,
+									'name'         => $name,
+									'resolved'     => ( $receiver !== null ),
+									'receiver'     => $receiver,
 									'callerClass'  => $current_class,
 									'callerMethod' => $current_method,
 									'file'         => $this->file_path,
 									'line'         => $node->getStartLine(),
-									'offset'       => $item1->getStartFilePos(),
+									'offset'       => $node->name->getStartFilePos(),
+								);
+							} else {
+								$this->analyzer->accesses[] = array(
+									'kind'         => 'dynamic_method',
+									'name'         => '*',
+									'resolved'     => false,
+									'receiver'     => $is_this ? $current_class : null,
+									'callerClass'  => $current_class,
+									'callerMethod' => $current_method,
+									'file'         => $this->file_path,
+									'line'         => $node->getStartLine(),
+									'offset'       => $node->getStartFilePos(),
 								);
 							}
+						} elseif ( $node instanceof Node\Expr\PropertyFetch || $node instanceof Node\Expr\NullsafePropertyFetch ) {
+							$is_this = ( $node->var instanceof Node\Expr\Variable && $node->var->name === 'this' );
+							if ( $node->name instanceof Node\Identifier ) {
+								$name    = $node->name->toString();
+								$receiver = null;
+								if ( $is_this ) {
+									$receiver = $current_class;
+								} elseif ( $node->var instanceof Node\Expr\Variable && is_string( $node->var->name ) && isset( $curr_param_types[ $node->var->name ] ) ) {
+									$receiver = $curr_param_types[ $node->var->name ];
+								}
+								$this->analyzer->accesses[] = array(
+									'kind'         => 'property',
+									'name'         => $name,
+									'resolved'     => ( $receiver !== null ),
+									'receiver'     => $receiver,
+									'callerClass'  => $current_class,
+									'callerMethod' => $current_method,
+									'file'         => $this->file_path,
+									'line'         => $node->getStartLine(),
+									'offset'       => $node->name->getStartFilePos(),
+								);
+							} else {
+								$this->analyzer->accesses[] = array(
+									'kind'         => 'dynamic_property',
+									'name'         => '*',
+									'resolved'     => false,
+									'receiver'     => $is_this ? $current_class : null,
+									'callerClass'  => $current_class,
+									'callerMethod' => $current_method,
+									'file'         => $this->file_path,
+									'line'         => $node->getStartLine(),
+									'offset'       => $node->getStartFilePos(),
+								);
+							}
+						} elseif ( $node instanceof Node\Expr\ArrayItem && $node->key instanceof Node\Scalar\String_ && in_array( $node->key->value, array( 'callback', 'sanitize_callback', 'render_callback' ), true ) ) {
+							if ( $node->value instanceof Node\Expr\Array_ && count( $node->value->items ) === 2 ) {
+								$item0 = isset( $node->value->items[0] ) && $node->value->items[0] ? $node->value->items[0]->value : null;
+								$item1 = isset( $node->value->items[1] ) && $node->value->items[1] ? $node->value->items[1]->value : null;
+								if ( $item0 instanceof Node\Expr\Variable && $item0->name === 'this' && $item1 instanceof Node\Scalar\String_ ) {
+									$this->analyzer->accesses[] = array(
+										'kind'         => 'method',
+										'name'         => strtolower( $item1->value ),
+										'resolved'     => true,
+										'receiver'     => $current_class,
+										'callerClass'  => $current_class,
+										'callerMethod' => $current_method,
+										'file'         => $this->file_path,
+										'line'         => $node->value->getStartLine(),
+										'offset'       => $item1->getStartFilePos(),
+									);
+								}
+							}
 						} elseif ( $node instanceof Node\Expr\StaticCall && $node->name instanceof Node\Identifier ) {
-							$name      = $node->name->toString();
+							$name      = strtolower( $node->name->toString() );
 							$class_ref = $node->class instanceof Node\Name ? $node->class->toString() : null;
 							$receiver  = ( $class_ref === 'self' || $class_ref === 'static' ) ? $current_class : $class_ref;
 							$this->analyzer->accesses[] = array(
@@ -527,10 +622,12 @@ class Plan3_Symbol_Analyzer {
 						array_pop( $this->class_stack );
 					} elseif ( $node instanceof Node\Stmt\ClassMethod ) {
 						array_pop( $this->method_stack );
-						$this->param_types = array();
 					}
 
 					if ( $node instanceof Node\Stmt\Function_ || $node instanceof Node\Stmt\ClassMethod || $node instanceof Node\Expr\Closure || $node instanceof Node\Expr\ArrowFunction ) {
+						if ( ! empty( $this->param_types_stack ) ) {
+							array_pop( $this->param_types_stack );
+						}
 						if ( $this->current_scope->parent !== null ) {
 							$this->current_scope = $this->current_scope->parent;
 						}
@@ -538,45 +635,168 @@ class Plan3_Symbol_Analyzer {
 				}
 
 				public function process_scope_decisions() {
-					$propagate = function( $scope ) use ( &$propagate ) {
-						if ( $scope->is_dynamic || isset( $scope->preserved_vars['*'] ) ) {
-							$scope->preserved_vars['*'] = true;
-						}
-
-						foreach ( $scope->children as $child ) {
-							if ( $child->type === 'closure' ) {
-								if ( isset( $scope->preserved_vars['*'] ) ) {
-									foreach ( $child->captured_vars as $c_var => $meta ) {
-										$child->preserved_vars[ $c_var ] = true;
+					// 1. Initial compact evaluation: determine which compact calls can be safely rewritten
+					foreach ( $this->all_file_scopes as $scope ) {
+						foreach ( $scope->compact_calls as $offset => $callNode ) {
+							$can_rewrite = true;
+							if ( $scope->is_dynamic || $scope->type === 'file' || empty( $callNode->args ) ) {
+								$can_rewrite = false;
+							}
+							$args = array();
+							if ( $can_rewrite ) {
+								foreach ( $callNode->args as $arg ) {
+									$val = $arg instanceof Node\Arg ? $arg->value : $arg;
+									if ( $val instanceof Node\Scalar\String_ ) {
+										$arg_name = '$' . $val->value;
+										if ( ! isset( $scope->declared_vars[ $arg_name ] )
+											|| isset( $scope->params[ $arg_name ] )
+											|| isset( $scope->unset_vars[ $arg_name ] )
+											|| isset( $scope->preserved_vars[ $arg_name ] )
+											|| isset( $this->analyzer->project_global_vars[ $arg_name ] )
+											|| in_array( $arg_name, Plan3_Symbol_Analyzer::$reserved_vars, true )
+										) {
+											$can_rewrite = false;
+											break;
+										}
+										$args[] = $val->value;
+									} else {
+										$can_rewrite = false;
+										break;
 									}
+								}
+							}
+
+							if ( $can_rewrite && ! empty( $args ) ) {
+								$this->analyzer->file_compact_decisions[ $this->file_path ][ $offset ] = array( 'rewrite', $args );
+							} else {
+								$this->analyzer->file_compact_decisions[ $this->file_path ][ $offset ] = 'retain';
+								$vars = array();
+								$all_resolvable = true;
+								foreach ( $callNode->args as $arg ) {
+									$val = $arg instanceof Node\Arg ? $arg->value : $arg;
+									$this->extract_compact_vars( $val, $vars, $all_resolvable );
+								}
+								if ( ! $all_resolvable ) {
+									$scope->is_dynamic = true;
+									$scope->dynamic_reasons[] = 'compact_unresolved';
 								} else {
-									foreach ( $child->captured_vars as $c_var => $meta ) {
-										if ( isset( $scope->preserved_vars[ $c_var ] ) ) {
-											$child->preserved_vars[ $c_var ] = true;
+									foreach ( $vars as $v_name ) {
+										$scope->preserved_vars[ $v_name ] = true;
+									}
+								}
+							}
+						}
+					}
+
+					// 2. Bidirectional propagation loop
+					$changed = true;
+					$passes  = 0;
+					while ( $changed && $passes < 20 ) {
+						$changed = false;
+						$passes++;
+
+						foreach ( $this->all_file_scopes as $scope ) {
+							if ( $scope->is_dynamic && ! isset( $scope->preserved_vars['*'] ) ) {
+								$scope->preserved_vars['*'] = true;
+								$changed = true;
+							}
+
+							foreach ( $scope->children as $child ) {
+								if ( $child->is_dynamic && ! isset( $child->preserved_vars['*'] ) ) {
+									$child->preserved_vars['*'] = true;
+									$changed = true;
+								}
+
+								// 1. Downward propagation from parent scope to child
+								if ( $child->type === 'closure' ) {
+									if ( isset( $scope->preserved_vars['*'] ) ) {
+										foreach ( $child->captured_vars as $c_var => $meta ) {
+											if ( ! isset( $child->preserved_vars[ $c_var ] ) ) {
+												$child->preserved_vars[ $c_var ] = true;
+												$changed = true;
+											}
+										}
+									} else {
+										foreach ( $child->captured_vars as $c_var => $meta ) {
+											if ( isset( $scope->preserved_vars[ $c_var ] ) && ! isset( $child->preserved_vars[ $c_var ] ) ) {
+												$child->preserved_vars[ $c_var ] = true;
+												$changed = true;
+											}
+										}
+									}
+								} elseif ( $child->type === 'arrow' ) {
+									if ( isset( $scope->preserved_vars['*'] ) ) {
+										foreach ( $child->used_vars as $u_var => $_ ) {
+											if ( ! isset( $child->declared_vars[ $u_var ] ) && ! isset( $child->preserved_vars[ $u_var ] ) ) {
+												$child->preserved_vars[ $u_var ] = true;
+												$changed = true;
+											}
+										}
+									} else {
+										foreach ( $child->used_vars as $u_var => $_ ) {
+											if ( isset( $scope->preserved_vars[ $u_var ] ) && ! isset( $child->declared_vars[ $u_var ] ) && ! isset( $child->preserved_vars[ $u_var ] ) ) {
+												$child->preserved_vars[ $u_var ] = true;
+												$changed = true;
+											}
 										}
 									}
 								}
-							} elseif ( $child->type === 'arrow' ) {
-								if ( isset( $scope->preserved_vars['*'] ) ) {
-									foreach ( $child->used_vars as $u_var => $_ ) {
-										if ( ! isset( $child->declared_vars[ $u_var ] ) ) {
-											$child->preserved_vars[ $u_var ] = true;
+
+								// 2. Upward propagation from child closure/arrow to parent scope
+								if ( $child->type === 'closure' ) {
+									if ( isset( $child->preserved_vars['*'] ) ) {
+										foreach ( $child->captured_vars as $c_var => $meta ) {
+											if ( ! isset( $scope->preserved_vars[ $c_var ] ) ) {
+												$scope->preserved_vars[ $c_var ] = true;
+												$changed = true;
+											}
+										}
+									} else {
+										foreach ( $child->captured_vars as $c_var => $meta ) {
+											if ( isset( $child->preserved_vars[ $c_var ] ) && ! isset( $scope->preserved_vars[ $c_var ] ) ) {
+												$scope->preserved_vars[ $c_var ] = true;
+												$changed = true;
+											}
 										}
 									}
-								} else {
-									foreach ( $child->used_vars as $u_var => $_ ) {
-										if ( isset( $scope->preserved_vars[ $u_var ] ) ) {
-											$child->preserved_vars[ $u_var ] = true;
+								} elseif ( $child->type === 'arrow' ) {
+									if ( isset( $child->preserved_vars['*'] ) ) {
+										foreach ( $child->used_vars as $u_var => $_ ) {
+											if ( ! isset( $child->declared_vars[ $u_var ] ) && ! isset( $scope->preserved_vars[ $u_var ] ) ) {
+												$scope->preserved_vars[ $u_var ] = true;
+												$changed = true;
+											}
+										}
+									} else {
+										foreach ( $child->used_vars as $u_var => $_ ) {
+											if ( isset( $child->preserved_vars[ $u_var ] ) && ! isset( $child->declared_vars[ $u_var ] ) && ! isset( $scope->preserved_vars[ $u_var ] ) ) {
+												$scope->preserved_vars[ $u_var ] = true;
+												$changed = true;
+											}
 										}
 									}
 								}
 							}
-							$propagate( $child );
 						}
-					};
-					$propagate( $this->file_scope );
+					}
 
+					// 3. Post-propagation check: ensure no rewritten compact uses a preserved variable
 					foreach ( $this->all_file_scopes as $scope ) {
+						foreach ( $scope->compact_calls as $offset => $callNode ) {
+							$dec = isset( $this->analyzer->file_compact_decisions[ $this->file_path ][ $offset ] ) ? $this->analyzer->file_compact_decisions[ $this->file_path ][ $offset ] : 'retain';
+							if ( is_array( $dec ) && $dec[0] === 'rewrite' ) {
+								foreach ( $dec[1] as $a_name ) {
+									if ( isset( $scope->preserved_vars[ '$' . $a_name ] ) || isset( $scope->preserved_vars['*'] ) ) {
+										$this->analyzer->file_compact_decisions[ $this->file_path ][ $offset ] = 'retain';
+										foreach ( $dec[1] as $preserved_a ) {
+											$scope->preserved_vars[ '$' . $preserved_a ] = true;
+										}
+										break;
+									}
+								}
+							}
+						}
+
 						foreach ( $scope->var_nodes as $offset => $v_name ) {
 							$must_preserve = false;
 							if ( isset( $scope->preserved_vars['*'] ) || isset( $scope->preserved_vars[ $v_name ] ) ) {
@@ -591,37 +811,6 @@ class Plan3_Symbol_Analyzer {
 								'var'    => $v_name,
 								'action' => $must_preserve ? 'preserve' : 'mangle',
 							);
-						}
-
-						foreach ( $scope->compact_calls as $offset => $callNode ) {
-							if ( isset( $scope->preserved_vars['*'] ) || $scope->is_dynamic || $scope->type === 'file' ) {
-								$this->analyzer->file_compact_decisions[ $this->file_path ][ $offset ] = 'retain';
-							} else {
-								$all_rewritable = true;
-								$args = array();
-								foreach ( $callNode->args as $arg ) {
-									if ( $arg->value instanceof Node\Scalar\String_ ) {
-										$arg_name = '$' . $arg->value->value;
-										if ( isset( $scope->preserved_vars[ $arg_name ] ) || isset( $this->analyzer->project_global_vars[ $arg_name ] ) || in_array( $arg_name, Plan3_Symbol_Analyzer::$reserved_vars, true ) ) {
-											$all_rewritable = false;
-											break;
-										}
-										if ( ! isset( $scope->declared_vars[ $arg_name ] ) ) {
-											$all_rewritable = false;
-											break;
-										}
-										$args[] = $arg->value->value;
-									} else {
-										$all_rewritable = false;
-										break;
-									}
-								}
-								if ( $all_rewritable && ! empty( $args ) ) {
-									$this->analyzer->file_compact_decisions[ $this->file_path ][ $offset ] = array( 'rewrite', $args );
-								} else {
-									$this->analyzer->file_compact_decisions[ $this->file_path ][ $offset ] = 'retain';
-								}
-							}
 						}
 					}
 				}
@@ -693,10 +882,24 @@ class Plan3_Symbol_Analyzer {
 			);
 		}
 
-		// 3. Find unresolved accesses (unprovable receiver)
-		$unresolved = array();
+		// 3. Find unresolved accesses (unprovable receiver) and dynamic calls
+		$unresolved         = array();
+		$dynamic_methods    = array();
+		$dynamic_properties = array();
 		foreach ( $this->accesses as $acc ) {
-			if ( ! $acc['resolved'] ) {
+			if ( $acc['kind'] === 'dynamic_method' ) {
+				if ( ! empty( $acc['receiver'] ) ) {
+					$dynamic_methods[ $acc['receiver'] ] = true;
+				} elseif ( ! empty( $acc['callerClass'] ) ) {
+					$dynamic_methods[ $acc['callerClass'] ] = true;
+				}
+			} elseif ( $acc['kind'] === 'dynamic_property' ) {
+				if ( ! empty( $acc['receiver'] ) ) {
+					$dynamic_properties[ $acc['receiver'] ] = true;
+				} elseif ( ! empty( $acc['callerClass'] ) ) {
+					$dynamic_properties[ $acc['callerClass'] ] = true;
+				}
+			} elseif ( ! $acc['resolved'] ) {
 				$caller = $acc['callerClass'];
 				$kind   = $acc['kind'];
 				$name   = $acc['name'];
@@ -704,9 +907,44 @@ class Plan3_Symbol_Analyzer {
 			}
 		}
 
-		// 4. Determine Mangling & Preservation Decisions
+		// 4. Initial preservation from dynamic accesses, serialized classes, and unresolved callers
+		foreach ( $dynamic_methods as $c_name => $_ ) {
+			if ( isset( $this->classes[ $c_name ] ) ) {
+				foreach ( $this->classes[ $c_name ]['methods'] as $m_name => $meta ) {
+					$this->preserved_members[ $c_name ]['methods'][ $m_name ] = 'dynamic_method';
+					$declaring = $meta['declaring'];
+					if ( $declaring !== $c_name ) {
+						$this->preserved_members[ $declaring ]['methods'][ $m_name ] = 'dynamic_method';
+					}
+				}
+			}
+		}
+
+		foreach ( $dynamic_properties as $c_name => $_ ) {
+			if ( isset( $this->classes[ $c_name ] ) ) {
+				foreach ( $this->classes[ $c_name ]['properties'] as $p_name => $meta ) {
+					$this->preserved_members[ $c_name ]['properties'][ $p_name ] = 'dynamic_property';
+					$declaring = $meta['declaring'];
+					if ( $declaring !== $c_name ) {
+						$this->preserved_members[ $declaring ]['properties'][ $p_name ] = 'dynamic_property';
+					}
+				}
+			}
+		}
+
+		foreach ( $this->serialized_classes as $ser_class => $_ ) {
+			if ( isset( $this->classes[ $ser_class ] ) ) {
+				foreach ( $this->classes[ $ser_class ]['properties'] as $p_name => $meta ) {
+					$this->preserved_members[ $ser_class ]['properties'][ $p_name ] = 'serialized_class';
+					$declaring = $meta['declaring'];
+					if ( $declaring !== $ser_class ) {
+						$this->preserved_members[ $declaring ]['properties'][ $p_name ] = 'serialized_class';
+					}
+				}
+			}
+		}
+
 		foreach ( $this->classes as $c_name => $class ) {
-			// Methods
 			foreach ( $class['methods'] as $m_name => $meta ) {
 				if ( $meta['visibility'] === 'private' ) {
 					if ( in_array( $m_name, self::$magic_methods, true ) ) {
@@ -715,18 +953,76 @@ class Plan3_Symbol_Analyzer {
 						if ( $declaring !== $c_name ) {
 							$this->preserved_members[ $declaring ]['methods'][ $m_name ] = 'magic_method';
 						}
-						continue;
-					}
-					if ( isset( $unresolved[ $c_name ]['method'][ $m_name ] ) ) {
+					} elseif ( isset( $unresolved[ $c_name ]['method'][ $m_name ] ) ) {
 						$reason = $unresolved[ $c_name ]['method'][ $m_name ];
 						$this->preserved_members[ $c_name ]['methods'][ $m_name ] = $reason;
 						$declaring = $meta['declaring'];
 						if ( $declaring !== $c_name ) {
 							$this->preserved_members[ $declaring ]['methods'][ $m_name ] = $reason;
 						}
+					}
+				}
+			}
+			foreach ( $class['properties'] as $p_name => $meta ) {
+				if ( $meta['visibility'] === 'private' && isset( $unresolved[ $c_name ]['property'][ $p_name ] ) ) {
+					$reason = $unresolved[ $c_name ]['property'][ $p_name ];
+					$this->preserved_members[ $c_name ]['properties'][ $p_name ] = $reason;
+					$declaring = $meta['declaring'];
+					if ( $declaring !== $c_name ) {
+						$this->preserved_members[ $declaring ]['properties'][ $p_name ] = $reason;
+					}
+				}
+			}
+			foreach ( $class['constants'] as $k_name => $meta ) {
+				if ( $meta['visibility'] === 'private' && isset( $unresolved[ $c_name ]['constant'][ $k_name ] ) ) {
+					$reason = $unresolved[ $c_name ]['constant'][ $k_name ];
+					$this->preserved_members[ $c_name ]['constants'][ $k_name ] = $reason;
+					$declaring = $meta['declaring'];
+					if ( $declaring !== $c_name ) {
+						$this->preserved_members[ $declaring ]['constants'][ $k_name ] = $reason;
+					}
+				}
+			}
+		}
+
+		// 5. Trait preservation fixed-point loop across all classes and traits
+		$t_changed = true;
+		$t_passes  = 0;
+		while ( $t_changed && $t_passes < 10 ) {
+			$t_changed = false;
+			$t_passes++;
+			foreach ( $this->classes as $c_name => $class ) {
+				foreach ( $class['traits'] as $t_name ) {
+					if ( ! isset( $this->classes[ $t_name ] ) ) {
 						continue;
 					}
+					$trait = $this->classes[ $t_name ];
+					foreach ( array( 'methods', 'properties', 'constants' ) as $kind ) {
+						if ( isset( $this->preserved_members[ $c_name ][ $kind ] ) ) {
+							foreach ( $this->preserved_members[ $c_name ][ $kind ] as $mem => $reason ) {
+								if ( isset( $trait[ $kind ][ $mem ] ) && ! isset( $this->preserved_members[ $t_name ][ $kind ][ $mem ] ) ) {
+									$this->preserved_members[ $t_name ][ $kind ][ $mem ] = $reason;
+									$t_changed = true;
+								}
+							}
+						}
+						if ( isset( $this->preserved_members[ $t_name ][ $kind ] ) ) {
+							foreach ( $this->preserved_members[ $t_name ][ $kind ] as $mem => $reason ) {
+								if ( isset( $class[ $kind ][ $mem ] ) && ! isset( $this->preserved_members[ $c_name ][ $kind ][ $mem ] ) ) {
+									$this->preserved_members[ $c_name ][ $kind ][ $mem ] = $reason;
+									$t_changed = true;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 
+		// 6. Generate mangled private members
+		foreach ( $this->classes as $c_name => $class ) {
+			foreach ( $class['methods'] as $m_name => $meta ) {
+				if ( $meta['visibility'] === 'private' && ! isset( $this->preserved_members[ $c_name ]['methods'][ $m_name ] ) ) {
 					$declaring = $meta['declaring'];
 					$mangled   = '_m_' . substr( hash( 'sha256', $this->seed . ':m:' . $declaring . '::' . $m_name ), 0, 8 );
 					$this->private_members['methods'][ $c_name ][ $m_name ] = $mangled;
@@ -735,20 +1031,8 @@ class Plan3_Symbol_Analyzer {
 					}
 				}
 			}
-
-			// Properties
 			foreach ( $class['properties'] as $p_name => $meta ) {
-				if ( $meta['visibility'] === 'private' ) {
-					if ( isset( $unresolved[ $c_name ]['property'][ $p_name ] ) ) {
-						$reason = $unresolved[ $c_name ]['property'][ $p_name ];
-						$this->preserved_members[ $c_name ]['properties'][ $p_name ] = $reason;
-						$declaring = $meta['declaring'];
-						if ( $declaring !== $c_name ) {
-							$this->preserved_members[ $declaring ]['properties'][ $p_name ] = $reason;
-						}
-						continue;
-					}
-
+				if ( $meta['visibility'] === 'private' && ! isset( $this->preserved_members[ $c_name ]['properties'][ $p_name ] ) ) {
 					$declaring = $meta['declaring'];
 					$mangled   = '_p_' . substr( hash( 'sha256', $this->seed . ':p:' . $declaring . '::' . $p_name ), 0, 8 );
 					$this->private_members['properties'][ $c_name ][ $p_name ] = $mangled;
@@ -757,25 +1041,26 @@ class Plan3_Symbol_Analyzer {
 					}
 				}
 			}
-
-			// Constants
 			foreach ( $class['constants'] as $k_name => $meta ) {
-				if ( $meta['visibility'] === 'private' ) {
-					if ( isset( $unresolved[ $c_name ]['constant'][ $k_name ] ) ) {
-						$reason = $unresolved[ $c_name ]['constant'][ $k_name ];
-						$this->preserved_members[ $c_name ]['constants'][ $k_name ] = $reason;
-						$declaring = $meta['declaring'];
-						if ( $declaring !== $c_name ) {
-							$this->preserved_members[ $declaring ]['constants'][ $k_name ] = $reason;
-						}
-						continue;
-					}
-
+				if ( $meta['visibility'] === 'private' && ! isset( $this->preserved_members[ $c_name ]['constants'][ $k_name ] ) ) {
 					$declaring = $meta['declaring'];
 					$mangled   = '_k_' . substr( hash( 'sha256', $this->seed . ':k:' . $declaring . '::' . $k_name ), 0, 8 );
 					$this->private_members['constants'][ $c_name ][ $k_name ] = $mangled;
 					if ( $declaring !== $c_name ) {
 						$this->private_members['constants'][ $declaring ][ $k_name ] = $mangled;
+					}
+				}
+			}
+		}
+
+		// 7. Sanity strip: ensure no preserved member exists in private_members
+		foreach ( array( 'methods', 'properties', 'constants' ) as $kind ) {
+			if ( ! empty( $this->preserved_members ) ) {
+				foreach ( $this->preserved_members as $c_name => $kinds ) {
+					if ( isset( $kinds[ $kind ] ) ) {
+						foreach ( $kinds[ $kind ] as $mem => $_ ) {
+							unset( $this->private_members[ $kind ][ $c_name ][ $mem ] );
+						}
 					}
 				}
 			}

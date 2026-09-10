@@ -71,6 +71,11 @@ export async function runFixtureHarness(fixture, options = {}) {
   const transformerPhp = options.transformerPhp || DEFAULT_TRANSFORMER_PHP;
   const externalRunnerCode = fixture.externalRunner || options.externalRunner || null;
 
+  const flatten = fixture.flatten !== undefined ? fixture.flatten : (options.flatten !== undefined ? options.flatten : 1);
+  const mangle = fixture.mangle !== undefined ? fixture.mangle : (options.mangle !== undefined ? options.mangle : 1);
+  const stripComments = fixture.stripComments !== undefined ? fixture.stripComments : (options.stripComments !== undefined ? options.stripComments : (mangle ? 1 : 0));
+  const exactOutput = Boolean(fixture.exactOutput || options.exactOutput);
+
   const tmpRoot = await mkdtemp(path.join(os.tmpdir(), `fixture-${caseName}-`));
   const cleanDir = path.join(tmpRoot, "clean");
   const transDir = path.join(tmpRoot, "transformed");
@@ -114,6 +119,9 @@ export async function runFixtureHarness(fixture, options = {}) {
         transDir,
         mapFile,
         seed,
+        `--flatten=${flatten ? 1 : 0}`,
+        `--mangle=${mangle ? 1 : 0}`,
+        `--strip-comments=${stripComments ? 1 : 0}`,
       ]);
     } catch (e) {
       dumpResult = { error: e.message, stderr: e.stderr, stdout: e.stdout };
@@ -128,6 +136,9 @@ export async function runFixtureHarness(fixture, options = {}) {
         mapFile,
         seed,
         mainFile,
+        `--flatten=${flatten ? 1 : 0}`,
+        `--mangle=${mangle ? 1 : 0}`,
+        `--strip-comments=${stripComments ? 1 : 0}`,
       ]);
     } catch (e) {
       batchResult = { error: e.message, stderr: e.stderr, stdout: e.stdout };
@@ -146,9 +157,36 @@ export async function runFixtureHarness(fixture, options = {}) {
             .trim()
         : "";
 
+    const normalizeDiagnostic = (err) =>
+      typeof err === "string"
+        ? err
+            .replaceAll(cleanDir, "%TARGET_DIR%")
+            .replaceAll(transDir, "%TARGET_DIR%")
+            .replace(/in %TARGET_DIR%\/[^:\n]+ on line \d+/g, "on line <NUM>")
+            .replace(/Stack trace:[\s\S]*?(?=\n\n|\n\[|\n\{|$)/g, "")
+            .trim()
+        : "";
+
+    const stdoutMatches = exactOutput
+      ? cleanResult.stdout === transformedResult.stdout
+      : normalizeOutput(cleanResult.stdout) === normalizeOutput(transformedResult.stdout);
+
+    const cleanErrNorm = normalizeDiagnostic(cleanResult.stderr);
+    const transErrNorm = normalizeDiagnostic(transformedResult.stderr);
+
+    let stderrMatches = true;
+    if (!fixture.allowStderr && !fixture.negativeWarning) {
+      if (cleanErrNorm === "" && transErrNorm !== "") {
+        stderrMatches = false;
+      } else if (cleanErrNorm !== transErrNorm) {
+        stderrMatches = false;
+      }
+    }
+
     const matched =
       cleanResult.exitCode === transformedResult.exitCode &&
-      normalizeOutput(cleanResult.stdout) === normalizeOutput(transformedResult.stdout);
+      stdoutMatches &&
+      stderrMatches;
 
     const matchesExpected =
       fixture.expectedExit !== undefined && fixture.expectedStdout !== undefined
@@ -445,3 +483,123 @@ export const PLAN_B_FIXTURES = [
     expectedStdout: 'O:5:"Vault":1:{s:13:"\u0000Vault\u0000secret";s:5:"value";}',
   },
 ];
+
+/**
+ * Review v3 Differential Probes (from section 5)
+ */
+export const V3_DIFFERENTIAL_FIXTURES = [
+  {
+    case: "compact_mixed",
+    files: {
+      "main.php": "<?php function run_it($param){$local=7;return compact('param','local');} echo json_encode(run_it(2));",
+    },
+    expectedExit: 0,
+    expectedStdout: '{"param":2,"local":7}',
+  },
+  {
+    case: "compact_array",
+    files: {
+      "main.php": "<?php function run_it(){$local=7;return compact(['local']);} echo json_encode(run_it());",
+    },
+    expectedExit: 0,
+    expectedStdout: '{"local":7}',
+  },
+  {
+    case: "compact_unset",
+    files: {
+      "main.php": "<?php function run_it(){$local=7;unset($local);return compact('local');} echo json_encode(run_it());",
+    },
+    expectedExit: 0,
+    expectedStdout: "[]",
+    negativeWarning: true,
+  },
+  {
+    case: "closure_child_dynamic",
+    files: {
+      "main.php": "<?php function run_it(){$local=7;$fn=function() use($local){return get_defined_vars();};return $fn();} echo json_encode(run_it());",
+    },
+    expectedExit: 0,
+    expectedStdout: '{"local":7}',
+  },
+  {
+    case: "trait_alias",
+    files: {
+      "main.php": "<?php trait SecretTrait{private function secret(){return 'ok';}} class Box{use SecretTrait{secret as public read;}} echo (new Box)->read();",
+    },
+    expectedExit: 0,
+    expectedStdout: "ok",
+  },
+  {
+    case: "private_case",
+    files: {
+      "main.php": "<?php class Box{private function secret(){return 'ok';}public function read(){return $this->SECRET();}}echo (new Box)->read();",
+    },
+    expectedExit: 0,
+    expectedStdout: "ok",
+  },
+  {
+    case: "dynamic_private",
+    files: {
+      "main.php": "<?php class Box{private function secret(){return 'ok';}public function read(){$method='secret';return $this->$method();}}echo (new Box)->read();",
+    },
+    expectedExit: 0,
+    expectedStdout: "ok",
+  },
+  {
+    case: "private_array_data",
+    files: {
+      "main.php": "<?php class Box{private function secret(){return 'ok';}public function read(){return [$this,'secret'][1];}}echo (new Box)->read();",
+    },
+    expectedExit: 0,
+    expectedStdout: "secret",
+  },
+  {
+    case: "typed_receiver_shadow",
+    files: {
+      "main.php": "<?php class Box{private function secret(){return 'local';}public function read(Box $other){$fn=function($other){return $other->secret();};return $fn(new Remote);}}class Remote{public function secret(){return 'remote';}}echo (new Box)->read(new Box);",
+    },
+    expectedExit: 0,
+    expectedStdout: "remote",
+  },
+  {
+    case: "serialized_plain",
+    files: {
+      "main.php": "<?php class Box{private $secret='ok';}echo serialize(new Box);",
+    },
+    expectedExit: 0,
+    expectedStdout: 'O:3:"Box":1:{s:11:"\0Box\0secret";s:2:"ok";}',
+  },
+  {
+    case: "class_magic",
+    files: {
+      "main.php": "<?php namespace Acme;class Worker{public function read(){return __CLASS__;}}echo (new Worker)->read();",
+    },
+    expectedExit: 0,
+    expectedStdout: "Acme\\Worker",
+  },
+  {
+    case: "trait_two_users",
+    files: {
+      "main.php": "<?php trait SecretTrait{private function secret(){return 'ok';}}class First{use SecretTrait;public function read(){return $this->secret();}}class Second{use SecretTrait;public function read($other){return $other->secret();}}echo (new First)->read().(new Second)->read(new Second);",
+    },
+    expectedExit: 0,
+    expectedStdout: "okok",
+  },
+  {
+    case: "namespaced_extract_alias",
+    files: {
+      "main.php": "<?php namespace Acme;use function extract as unpack_vars;function run_it(){unpack_vars(['local'=>7]);return $local;}echo run_it();",
+    },
+    expectedExit: 0,
+    expectedStdout: "7",
+  },
+  {
+    case: "namespaced_group_use",
+    files: {
+      "main.php": "<?php namespace A{class Worker{public function read(){return 'ok';}}}namespace B{use A\\{Worker};echo (new Worker)->read();}",
+    },
+    expectedExit: 0,
+    expectedStdout: "ok",
+  },
+];
+

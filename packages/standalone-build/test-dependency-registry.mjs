@@ -817,6 +817,40 @@ export const CANONICAL_TEST_REGISTRY = {
     "releaseSameRun": false,
     "tier": "unit"
   },
+  "v3-differential-probes.test.mjs": {
+    "tools": [
+      "tools/plan3/transformer.php",
+      "tools/plan3/symbol-analyzer.php"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "fast",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "unit"
+  },
+  "v3-transform-modes.test.mjs": {
+    "tools": [
+      "tools/plan3/transformer.php",
+      "tools/plan3/symbol-analyzer.php"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "fast",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "unit"
+  },
   "tavangary-core-artifact.test.mjs": {
     "tools": [
       "tools/assemble-profile-s-candidate.mjs",

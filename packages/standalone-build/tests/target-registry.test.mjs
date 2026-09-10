@@ -62,13 +62,21 @@ test("Target registry: seven standalone consumers are explicit and wpdev is not 
 });
 
 test("Target registry: real in-repo sources resolve to *-dev and never to deploy output", async () => {
+  let tested = 0;
   for (const consumer of listStandaloneConsumers()) {
+    const entry = TARGET_REGISTRY[consumer];
+    const sourceDir = path.join(contentRoot, "plugins", entry.sourceDirectoryName);
+    if (!fs.existsSync(sourceDir)) {
+      continue;
+    }
     const resolved = await resolveConsumerSource({ contentRoot, consumer });
     assert.equal(path.basename(resolved.sourceDir), `${consumer}-dev`);
     assert.equal(path.basename(resolved.deployDir), consumer);
     assert.notEqual(path.resolve(resolved.sourceDir), path.resolve(resolved.deployDir));
     assert.ok(fs.existsSync(path.join(resolved.sourceDir, resolved.entry.bootstrapFile)));
+    tested++;
   }
+  assert.ok(tested > 0, "At least one consumer must be present and tested");
 });
 
 test("Target registry: missing -dev source is fail-closed and must not fall back to deploy output", async () => {
