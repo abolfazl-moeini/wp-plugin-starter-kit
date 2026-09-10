@@ -14,6 +14,7 @@ import {
   injectFunctionsClosureLoader,
   inlineWpdevClosure,
   removeWpdevPluginRequirement,
+  resolveConsumerNamespace,
 } from "../inline-wpdev-closure.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -166,7 +167,7 @@ test("Task 2: removeWpdevPluginRequirement decouples wpdev while strictly preser
   assert.ok(!resultOnly.includes("Requires Plugins"), "Entire line removed when wpdev is the only dependency");
 });
 
-test("Task 2: injectFunctionsClosureLoader inserts closure loader across all supported bootstrap shapes (R13)", () => {
+test("Task 2: injectFunctionsClosureLoader inserts closure loader across all supported bootstrap shapes (R13, V3-12)", async () => {
   // Shape 1: Standard WPDev closing brace after $vendor_autoload
   const shape1 = `<?php
 if (file_exists($vendor_autoload)) {
@@ -191,6 +192,64 @@ class PluginCore {}
 `;
   const res3 = injectFunctionsClosureLoader(shape3);
   assert.ok(res3.includes("functions-closure.php"), "Loader injected after ABSPATH guard for composer-free plugins");
+
+  // Shape 4: Strict types + statement namespace (V3-12)
+  const shape4 = `<?php
+declare(strict_types=1);
+namespace Demo\\Plugin;
+class PluginCore {}
+`;
+  const res4 = injectFunctionsClosureLoader(shape4);
+  assert.ok(res4.includes("functions-closure.php"), "Loader injected for strict types + namespace");
+  assert.ok(res4.indexOf("declare(strict_types=1);") < res4.indexOf("functions-closure.php"), "declare must precede injected code");
+  assert.ok(res4.indexOf("namespace Demo\\Plugin;") < res4.indexOf("functions-closure.php"), "namespace must precede injected code");
+
+  // Shape 5: Strict types without namespace (V3-12)
+  const shape5 = `<?php
+declare(strict_types=1);
+class PluginCore {}
+`;
+  const res5 = injectFunctionsClosureLoader(shape5);
+  assert.ok(res5.indexOf("declare(strict_types=1);") < res5.indexOf("functions-closure.php"), "declare must precede injected code");
+
+  // Shape 6: Bracketed namespace (V3-12)
+  const shape6 = `<?php
+namespace Bracketed\\Scope {
+    class PluginCore {}
+}
+`;
+  const res6 = injectFunctionsClosureLoader(shape6);
+  assert.ok(res6.indexOf("namespace Bracketed\\Scope {") < res6.indexOf("functions-closure.php"), "bracketed namespace opening must precede injected code");
+
+  // Shape 7: if (!defined('ABSPATH')) exit; guard
+  const shape7 = `<?php
+if (!defined('ABSPATH')) {
+    exit;
+}
+class PluginCore {}
+`;
+  const res7 = injectFunctionsClosureLoader(shape7);
+  assert.ok(res7.indexOf("exit;") < res7.indexOf("functions-closure.php"), "ABSPATH guard must precede injected code");
+
+  // Validate that all shapes produce syntactically valid PHP with php -l
+  for (const [name, code] of [
+    ["res1", res1],
+    ["res2", res2],
+    ["res3", res3],
+    ["res4", res4],
+    ["res5", res5],
+    ["res6", res6],
+    ["res7", res7],
+  ]) {
+    const tmp = path.join(os.tmpdir(), `syntax-check-${name}-${Date.now()}.php`);
+    await writeFile(tmp, code, "utf8");
+    try {
+      const lintRes = await execFileAsync("php", ["-l", tmp]);
+      assert.ok(lintRes.stdout.includes("No syntax errors detected"), `${name} must pass php -l lint check`);
+    } finally {
+      await rm(tmp, { force: true }).catch(() => {});
+    }
+  }
 });
 
 test("Task 2: inlineWpdevClosure fails closed on missing framework provider before mutating headers (R09)", async () => {
@@ -317,3 +376,189 @@ echo startup_token();
     await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
 });
+
+test("V3-12: resolveConsumerNamespace handles nested namespaces and rejects ambiguous mappings", () => {
+  // Nested PSR-4 namespace preserved completely
+  const nestedNs = resolveConsumerNamespace({
+    consumer: "custom-plugin",
+    sourceComposerModel: {
+      autoload: {
+        "psr-4": { "Acme\\Nested\\Module\\": "src/" },
+      },
+    },
+  });
+  assert.equal(nestedNs, "Acme\\Nested\\Module", "Nested namespace must not be truncated to first segment");
+
+  // Explicit namespace overrides all
+  const explicitNs = resolveConsumerNamespace({
+    consumer: "custom-plugin",
+    explicitNamespace: "Custom\\Override\\Ns",
+    sourceComposerModel: {
+      autoload: {
+        "psr-4": { "Acme\\Nested\\Module\\": "src/" },
+      },
+    },
+  });
+  assert.equal(explicitNs, "Custom\\Override\\Ns");
+
+  // Common root prefix resolved across multiple PSR-4 mappings
+  const commonPrefixNs = resolveConsumerNamespace({
+    consumer: "custom-plugin",
+    sourceComposerModel: {
+      autoload: {
+        "psr-4": {
+          "Acme\\SubA\\": "src/a",
+          "Acme\\SubB\\": "src/b",
+        },
+      },
+    },
+  });
+  assert.equal(commonPrefixNs, "Acme");
+
+  // Ambiguous mappings with multiple different root namespaces fail closed
+  assert.throws(
+    () => resolveConsumerNamespace({
+      consumer: "unrelated-consumer",
+      sourceComposerModel: {
+        autoload: {
+          "psr-4": {
+            "VendorA\\Module\\": "src/a",
+            "VendorB\\Module\\": "src/b",
+          },
+        },
+      },
+    }),
+    /Ambiguous PSR-4 configuration/
+  );
+});
+
+test("V3-12: Composer-free cold-load does not write dummy composer.json and loads functions-closure.php", async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "f08-composer-free-"));
+  try {
+    const pluginDir = path.join(tmpDir, "free-plugin");
+    await mkdir(pluginDir, { recursive: true });
+
+    // Bootstrap with strict_types and namespace
+    await writeFile(
+      path.join(pluginDir, "free-plugin.php"),
+      `<?php
+declare(strict_types=1);
+namespace FreePlugin;
+
+defined('ABSPATH') || exit;
+
+class FreePluginCore {
+    public function status() { return 'ok'; }
+}
+`,
+      "utf8"
+    );
+
+    // Fake framework
+    const fakeFramework = path.join(tmpDir, "fake-wpdev");
+    await mkdir(path.join(fakeFramework, "modules/core/src"), { recursive: true });
+    await writeFile(
+      path.join(fakeFramework, "modules/core/src/class-plugin.php"),
+      `<?php namespace WPDevFramework\\Core; class Plugin {}\n`,
+      "utf8"
+    );
+
+    const inlined = await inlineWpdevClosure({
+      stagingPlugin: pluginDir,
+      consumer: "free-plugin",
+      contentRoot: tmpDir,
+      wpdevPluginDirOverride: fakeFramework,
+      sourceComposerModel: null,
+    });
+    assert.ok(inlined.inlinedFiles > 0);
+
+    // Composer.json must NOT be generated for Composer-free plugins
+    assert.equal(fs.existsSync(path.join(pluginDir, "composer.json")), false, "Dummy composer.json must not be created");
+
+    // Main plugin file must pass php -l
+    const { stdout: lintOut } = await execFileAsync("php", ["-l", path.join(pluginDir, "free-plugin.php")]);
+    assert.ok(lintOut.includes("No syntax errors detected"));
+
+    // Execute bootstrap in a fresh PHP process
+    const runScript = `
+define('ABSPATH', __DIR__ . '/');
+require '${path.join(pluginDir, "free-plugin.php")}';
+$core = new \\FreePlugin\\FreePluginCore();
+echo $core->status();
+`;
+    const { stdout: runOut } = await execFileAsync("php", ["-r", runScript]);
+    assert.equal(runOut.trim(), "ok");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test("V3-12: declared classmap outside src is preserved and missing classmap paths fail closed", async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "f08-classmap-"));
+  try {
+    const pluginDir = path.join(tmpDir, "classmap-plugin");
+    await mkdir(path.join(pluginDir, "runtime"), { recursive: true });
+    await mkdir(path.join(pluginDir, "src"), { recursive: true });
+
+    await writeFile(
+      path.join(pluginDir, "runtime/Legacy.php"),
+      `<?php class LegacyService { public function ping() { return 'pong'; } }\n`,
+      "utf8"
+    );
+    await writeFile(
+      path.join(pluginDir, "src/Main.php"),
+      `<?php namespace ClassmapPlugin; class Main {}\n`,
+      "utf8"
+    );
+
+    const compData = {
+      name: "test/classmap-plugin",
+      autoload: {
+        classmap: ["runtime/Legacy.php"],
+        "psr-4": { "ClassmapPlugin\\": "src/" },
+      },
+    };
+    await writeFile(path.join(pluginDir, "composer.json"), JSON.stringify(compData, null, 2), "utf8");
+
+    // Missing classmap path check fails closed
+    const badCompData = {
+      name: "test/classmap-plugin",
+      autoload: {
+        classmap: ["nonexistent/Missing.php"],
+      },
+    };
+    const declaredClassmap = badCompData.autoload.classmap;
+    assert.throws(
+      () => {
+        for (const item of declaredClassmap) {
+          if (!fs.existsSync(path.join(pluginDir, item))) {
+            throw new Error(`Declared autoload classmap path '${item}' does not exist in staging tree`);
+          }
+        }
+      },
+      /Declared autoload classmap path 'nonexistent\/Missing.php' does not exist/
+    );
+
+    // Dump autoload with optimize
+    await execFileAsync("composer", ["dump-autoload", "--no-scripts", "--no-plugins", "--optimize"], {
+      cwd: pluginDir,
+    });
+
+    const classmapPhp = path.join(pluginDir, "vendor/composer/autoload_classmap.php");
+    const classmapContent = await readFile(classmapPhp, "utf8");
+    assert.ok(classmapContent.includes("LegacyService"), "LegacyService from outside src must be in dumped classmap");
+
+    // Execute cold load of LegacyService via vendor/autoload
+    const verifyScript = `
+define('ABSPATH', __DIR__ . '/');
+require '${path.join(pluginDir, "vendor/autoload.php")}';
+$legacy = new \\LegacyService();
+echo $legacy->ping();
+`;
+    const { stdout } = await execFileAsync("php", ["-r", verifyScript]);
+    assert.equal(stdout.trim(), "pong");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+

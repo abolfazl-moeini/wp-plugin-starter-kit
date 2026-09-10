@@ -186,6 +186,65 @@ const REQUIRED_WPDEV_ASSET_DIRS = [
   "modules/wizard/assets",
 ];
 
+export const CONSUMER_NAMESPACES = Object.freeze({
+  "drm-connector": "DRMConnector",
+  "tavangary-core": "TavangaryCore",
+  "tavangary-theme-panel": "TavangaryThemePanel",
+  "wpdev-analytics": "WpdevAnalytics",
+  "wpdev-crm": "WpdevCrm",
+  "wpdev-tickets": "WpdevTickets",
+  "wpdev-woo-persian": "WpdevWooPersian",
+});
+
+export function resolveConsumerNamespace({
+  consumer,
+  sourceComposerModel = null,
+  explicitNamespace = null,
+} = {}) {
+  if (explicitNamespace && typeof explicitNamespace === "string" && explicitNamespace.trim()) {
+    return explicitNamespace.trim().replace(/^\\+|\\+$/g, "");
+  }
+
+  const psr4 = sourceComposerModel?.autoload?.["psr-4"];
+  if (psr4 && typeof psr4 === "object") {
+    const keys = Object.keys(psr4).map((k) => k.replace(/^\\+|\\+$/g, "")).filter(Boolean);
+    if (keys.length === 1) {
+      return keys[0];
+    }
+    if (keys.length > 1) {
+      const normConsumer = String(consumer || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      const match = keys.find((k) => {
+        const norm = k.toLowerCase().replace(/[^a-z0-9]/g, "");
+        return norm === normConsumer || norm.endsWith(normConsumer);
+      });
+      if (match) {
+        return match;
+      }
+      const rootPrefixes = new Set(keys.map((k) => k.split("\\")[0]));
+      if (rootPrefixes.size === 1) {
+        return [...rootPrefixes][0];
+      }
+      throw new Error(
+        `Ambiguous PSR-4 configuration for consumer '${consumer}': multiple root namespaces [${keys.join(
+          ", "
+        )}]. Explicit consumer namespace is required.`
+      );
+    }
+  }
+
+  if (consumer && CONSUMER_NAMESPACES[consumer]) {
+    return CONSUMER_NAMESPACES[consumer];
+  }
+
+  if (consumer) {
+    return consumer
+      .replace(/[-_]([a-z])/g, (_, c) => c.toUpperCase())
+      .replace(/^[a-z]/, (c) => c.toUpperCase());
+  }
+
+  throw new Error("Unable to resolve consumer namespace: consumer slug is required");
+}
+
 export function removeWpdevPluginRequirement(mainPhp) {
   return mainPhp.replace(
     /^([ \t]*\*[ \t]*Requires Plugins:[ \t]*)(.+)$/gim,
@@ -217,8 +276,23 @@ export function injectFunctionsClosureLoader(mainPhp) {
   if (/(require(?:_once)?\s+\$[^;]*autoload[^;]*;)/.test(mainPhp)) {
     return mainPhp.replace(/(require(?:_once)?\s+\$[^;]*autoload[^;]*;)/, `$1${loaderSnippet}`);
   }
-  if (/(defined\s*\(\s*['"]ABSPATH['"]\s*\)\s*\|\|\s*exit\s*;)/i.test(mainPhp)) {
-    return mainPhp.replace(/(defined\s*\(\s*['"]ABSPATH['"]\s*\)\s*\|\|\s*exit\s*;)/i, `$1${loaderSnippet}\n`);
+  if (/(defined\s*\(\s*['"](?:ABSPATH|WPINC)['"]\s*\)\s*(?:\|\||or)\s*(?:exit|die)(?:\s*\([^)]*\))?\s*;)/i.test(mainPhp)) {
+    return mainPhp.replace(/(defined\s*\(\s*['"](?:ABSPATH|WPINC)['"]\s*\)\s*(?:\|\||or)\s*(?:exit|die)(?:\s*\([^)]*\))?\s*;)/i, `$1${loaderSnippet}\n`);
+  }
+  if (/(if\s*\(\s*!\s*defined\s*\(\s*['"](?:ABSPATH|WPINC)['"]\s*\)\s*\)\s*(?:\{\s*)?(?:exit|die)(?:\s*\([^)]*\))?\s*;\s*(?:\}\s*)?)/i.test(mainPhp)) {
+    return mainPhp.replace(/(if\s*\(\s*!\s*defined\s*\(\s*['"](?:ABSPATH|WPINC)['"]\s*\)\s*\)\s*(?:\{\s*)?(?:exit|die)(?:\s*\([^)]*\))?\s*;\s*(?:\}\s*)?)/i, `$1${loaderSnippet}\n`);
+  }
+  if (/(namespace\s+[A-Za-z0-9_\\]*\s*\{)/.test(mainPhp)) {
+    return mainPhp.replace(/(namespace\s+[A-Za-z0-9_\\]*\s*\{)/, `$1${loaderSnippet}\n`);
+  }
+  if (/(namespace\s+[A-Za-z0-9_\\]+\s*;)/.test(mainPhp)) {
+    return mainPhp.replace(/(namespace\s+[A-Za-z0-9_\\]+\s*;)/, `$1\n${loaderSnippet}\n`);
+  }
+  if (/(declare\s*\([^)]*\)\s*;)/.test(mainPhp)) {
+    return mainPhp.replace(/(declare\s*\([^)]*\)\s*;)/, `$1\n${loaderSnippet}\n`);
+  }
+  if (/(<\?php[\s\S]*?\/\*\*[\s\S]*?\*\/\s*)/.test(mainPhp)) {
+    return mainPhp.replace(/(<\?php[\s\S]*?\/\*\*[\s\S]*?\*\/\s*)/, `$1${loaderSnippet}\n`);
   }
   return mainPhp.replace(/(<\?php\s*)/, `$1${loaderSnippet}\n`);
 }
@@ -231,11 +305,14 @@ export async function inlineWpdevClosure({
   sourceComposerModel = null,
   inlineFramework = null,
   frameworkProvider = null,
+  consumerNamespace = null,
+  bootstrapFile = null,
 }) {
   const wpdevPluginDir = frameworkProvider
     || wpdevPluginDirOverride
     || path.join(contentRoot, "plugins/wpdev");
-  const mainPhpPath = path.join(stagingPlugin, `${consumer}.php`);
+  const bootstrapFileName = bootstrapFile || `${consumer}.php`;
+  const mainPhpPath = path.join(stagingPlugin, bootstrapFileName);
   const mainPhpExists = fs.existsSync(mainPhpPath);
   const mainPhpHeader = mainPhpExists ? await readFile(mainPhpPath, "utf8") : "";
   const headerRequiresWpdev = /Requires Plugins:.*wpdev/i.test(mainPhpHeader);
@@ -576,26 +653,11 @@ ${phpWrapperScript}
   }
   await normalizeClosureRequires(targetDir);
 
-  const CONSUMER_NAMESPACES = {
-    "drm-connector": "DRMConnector",
-    "tavangary-core": "TavangaryCore",
-    "tavangary-theme-panel": "TavangaryThemePanel",
-    "wpdev-analytics": "WpdevAnalytics",
-    "wpdev-crm": "WpdevCrm",
-    "wpdev-tickets": "WpdevTickets",
-    "wpdev-woo-persian": "WpdevWooPersian",
-  };
-  let declaredConsumerNs = null;
-  if (sourceComposerModel?.autoload?.["psr-4"]) {
-    const psr4Keys = Object.keys(sourceComposerModel.autoload["psr-4"]);
-    if (psr4Keys.length > 0) {
-      const firstKey = psr4Keys[0].replace(/\\+$/, "").split("\\")[0];
-      if (firstKey) declaredConsumerNs = firstKey;
-    }
-  }
-  const consumerNs = declaredConsumerNs || CONSUMER_NAMESPACES[consumer] || consumer
-    .replace(/[-_]([a-z])/g, (_, c) => c.toUpperCase())
-    .replace(/^[a-z]/, c => c.toUpperCase());
+  const consumerNs = resolveConsumerNamespace({
+    consumer,
+    sourceComposerModel,
+    explicitNamespace: consumerNamespace,
+  });
 
   // Create comprehensive master functions-closure.php
   const helperCode = `<?php
@@ -981,7 +1043,7 @@ if (!function_exists('wpdev_boot_closure_lifecycle')) {
   }
 
   // Scope framework core to consumer namespace
-  await scopeFrameworkCoreForConsumer(coreDestDir, stagingPlugin, consumer);
+  await scopeFrameworkCoreForConsumer(coreDestDir, stagingPlugin, consumer, consumerNs);
 
   // Write inlined files manifest
   const manifestData = {
@@ -1000,24 +1062,26 @@ if (!function_exists('wpdev_boot_closure_lifecycle')) {
   const composerJsonPath = path.join(stagingPlugin, "composer.json");
   let composerData = sourceComposerModel
     ? JSON.parse(JSON.stringify(sourceComposerModel))
-    : {};
-  if (!sourceComposerModel && fs.existsSync(composerJsonPath)) {
+    : null;
+  if (!composerData && fs.existsSync(composerJsonPath)) {
     try {
       composerData = JSON.parse(await readFile(composerJsonPath, "utf8"));
     } catch (err) {
       throw new Error(`staging composer.json is invalid JSON: ${err.message}`);
     }
   }
-  composerData.autoload = composerData.autoload || {};
-  composerData.autoload.files = composerData.autoload.files || [];
-  if (!composerData.autoload.files.includes("src/FrameworkClosure/functions-closure.php")) {
-    composerData.autoload.files.unshift("src/FrameworkClosure/functions-closure.php");
+  if (composerData) {
+    composerData.autoload = composerData.autoload || {};
+    composerData.autoload.files = composerData.autoload.files || [];
+    if (!composerData.autoload.files.includes("src/FrameworkClosure/functions-closure.php")) {
+      composerData.autoload.files.unshift("src/FrameworkClosure/functions-closure.php");
+    }
+    composerData.autoload["psr-4"] = composerData.autoload["psr-4"] || {};
+    const normalizedCoreKey = `${consumerNs}\\Core\\`;
+    composerData.autoload["psr-4"][normalizedCoreKey] = "src/FrameworkClosure/Core/Core/";
+    composerData.autoload["psr-4"]["WPDev\\"] = "src/FrameworkClosure/Core/";
+    await writeFile(composerJsonPath, JSON.stringify(composerData, null, 2), "utf8");
   }
-  composerData.autoload["psr-4"] = composerData.autoload["psr-4"] || {};
-  const normalizedCoreKey = `${consumerNs}\\Core\\`;
-  composerData.autoload["psr-4"][normalizedCoreKey] = "src/FrameworkClosure/Core/Core/";
-  composerData.autoload["psr-4"]["WPDev\\"] = "src/FrameworkClosure/Core/";
-  await writeFile(composerJsonPath, JSON.stringify(composerData, null, 2), "utf8");
 
   // Decouple main plugin file header and inject closure loader (only after closure files succeed!)
   if (mainPhpExists) {
@@ -1031,25 +1095,14 @@ if (!function_exists('wpdev_boot_closure_lifecycle')) {
   return { inlinedFiles: inlinedCount, manifestDigest: manifestData.manifestDigest };
 }
 
-export async function scopeFrameworkCoreForConsumer(coreDestDir, stagingPlugin, consumer) {
-  const CONSUMER_NAMESPACES = {
-    "drm-connector": "DRMConnector",
-    "tavangary-core": "TavangaryCore",
-    "tavangary-theme-panel": "TavangaryThemePanel",
-    "wpdev-analytics": "WpdevAnalytics",
-    "wpdev-crm": "WpdevCrm",
-    "wpdev-tickets": "WpdevTickets",
-    "wpdev-woo-persian": "WpdevWooPersian",
-  };
-  const consumerNs = CONSUMER_NAMESPACES[consumer] || consumer
-    .replace(/[-_]([a-z])/g, (_, c) => c.toUpperCase())
-    .replace(/^[a-z]/, c => c.toUpperCase());
+export async function scopeFrameworkCoreForConsumer(coreDestDir, stagingPlugin, consumer, consumerNs = null) {
+  const effectiveNs = consumerNs || resolveConsumerNamespace({ consumer });
 
   // 1. Process Core/Plugin.php in coreDestDir
   const pluginPhp = path.join(coreDestDir, "Core/Plugin.php");
   if (fs.existsSync(pluginPhp)) {
     let content = await readFile(pluginPhp, "utf8");
-    content = content.replace(/namespace\s+WPDev\\Core\s*;/g, `namespace ${consumerNs}\\Core;`);
+    content = content.replace(/namespace\s+WPDev\\Core\s*;/g, `namespace ${effectiveNs}\\Core;`);
     if (!content.includes("'WPDev\\Core\\Plugin'")) {
       content += `\nif ( ! \\class_exists( 'WPDev\\\\Core\\\\Plugin', false ) ) {\n    \\class_alias( Plugin::class, 'WPDev\\\\Core\\\\Plugin' );\n}\n`;
     }
@@ -1060,7 +1113,7 @@ export async function scopeFrameworkCoreForConsumer(coreDestDir, stagingPlugin, 
   const loaderPhp = path.join(coreDestDir, "Core/ModuleLoader.php");
   if (fs.existsSync(loaderPhp)) {
     let content = await readFile(loaderPhp, "utf8");
-    content = content.replace(/namespace\s+WPDev\\Core\s*;/g, `namespace ${consumerNs}\\Core;`);
+    content = content.replace(/namespace\s+WPDev\\Core\s*;/g, `namespace ${effectiveNs}\\Core;`);
     content = content.replace(/public\s+function\s+register\(\s*ModuleInterface\s+\$module\s*\)/g, "public function register( object $module )");
     if (!content.includes("'WPDev\\Core\\ModuleLoader'")) {
       content += `\nif ( ! \\class_exists( 'WPDev\\\\Core\\\\ModuleLoader', false ) ) {\n    \\class_alias( ModuleLoader::class, 'WPDev\\\\Core\\\\ModuleLoader' );\n}\n`;
@@ -1072,7 +1125,7 @@ export async function scopeFrameworkCoreForConsumer(coreDestDir, stagingPlugin, 
   const absModulePhp = path.join(coreDestDir, "Core/AbstractModule.php");
   if (fs.existsSync(absModulePhp)) {
     let content = await readFile(absModulePhp, "utf8");
-    content = content.replace(/namespace\s+WPDev\\Core\s*;/g, `namespace ${consumerNs}\\Core;`);
+    content = content.replace(/namespace\s+WPDev\\Core\s*;/g, `namespace ${effectiveNs}\\Core;`);
     if (!content.includes("'WPDev\\Core\\AbstractModule'")) {
       content += `\nif ( ! \\class_exists( 'WPDev\\\\Core\\\\AbstractModule', false ) ) {\n    \\class_alias( AbstractModule::class, 'WPDev\\\\Core\\\\AbstractModule' );\n}\n`;
     }
@@ -1083,7 +1136,7 @@ export async function scopeFrameworkCoreForConsumer(coreDestDir, stagingPlugin, 
   const modInterfacePhp = path.join(coreDestDir, "Core/ModuleInterface.php");
   if (fs.existsSync(modInterfacePhp)) {
     let content = await readFile(modInterfacePhp, "utf8");
-    content = content.replace(/namespace\s+WPDev\\Core\s*;/g, `namespace ${consumerNs}\\Core;`);
+    content = content.replace(/namespace\s+WPDev\\Core\s*;/g, `namespace ${effectiveNs}\\Core;`);
     if (!content.includes("'WPDev\\Core\\ModuleInterface'")) {
       content += `\nif ( ! \\interface_exists( 'WPDev\\\\Core\\\\ModuleInterface', false ) ) {\n    \\class_alias( ModuleInterface::class, 'WPDev\\\\Core\\\\ModuleInterface' );\n}\n`;
     }
@@ -1103,11 +1156,11 @@ export async function scopeFrameworkCoreForConsumer(coreDestDir, stagingPlugin, 
         let code = await readFile(full, "utf8");
         let modified = false;
         if (/use\s+WPDev\\Core\\Plugin(\s*;|\s+as)/.test(code)) {
-          code = code.replace(/use\s+WPDev\\Core\\Plugin(\s*;|\s+as)/g, `use ${consumerNs}\\Core\\Plugin$1`);
+          code = code.replace(/use\s+WPDev\\Core\\Plugin(\s*;|\s+as)/g, `use ${effectiveNs}\\Core\\Plugin$1`);
           modified = true;
         }
-        if (code.includes("\\WPDev\\Core\\Plugin::") && !code.includes(`\\${consumerNs}\\Core\\Plugin::`)) {
-          code = code.replace(/\\WPDev\\Core\\Plugin::/g, `\\${consumerNs}\\Core\\Plugin::`);
+        if (code.includes("\\WPDev\\Core\\Plugin::") && !code.includes(`\\${effectiveNs}\\Core\\Plugin::`)) {
+          code = code.replace(/\\WPDev\\Core\\Plugin::/g, `\\${effectiveNs}\\Core\\Plugin::`);
           modified = true;
         }
         if (modified) {
@@ -1118,7 +1171,7 @@ export async function scopeFrameworkCoreForConsumer(coreDestDir, stagingPlugin, 
   }
   await rewriteBarePluginRefs(stagingPlugin);
 
-  return { consumerNs };
+  return { consumerNs: effectiveNs };
 }
 
 /**

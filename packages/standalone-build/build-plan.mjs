@@ -128,6 +128,8 @@ export function computePlanFingerprint(planData) {
     source: {
       consumer: planData.consumer,
       frameworkProvider: planData.source?.frameworkProvider || null,
+      bootstrapFile: planData.source?.bootstrapFile || null,
+      consumerNamespace: planData.source?.consumerNamespace || null,
     },
   };
 
@@ -188,6 +190,8 @@ const ALLOWED_BUILD_PLAN_OPTIONS = new Set([
   "phpBin",
   "enforceTargetPhp",
   "emitDistDir",
+  "bootstrapFile",
+  "consumerNamespace",
   "argv",
 ]);
 
@@ -313,6 +317,8 @@ export function createBuildPlan(rawOptions = {}) {
     contentRoot: rawOptions.contentRoot ? path.resolve(rawOptions.contentRoot) : null,
     pluginsDir: rawOptions.pluginsDir ? path.resolve(rawOptions.pluginsDir) : null,
     frameworkProvider: rawOptions.frameworkProvider || null,
+    bootstrapFile: rawOptions.bootstrapFile || null,
+    consumerNamespace: rawOptions.consumerNamespace || null,
   });
 
   // Asset policy

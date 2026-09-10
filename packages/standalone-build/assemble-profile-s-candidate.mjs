@@ -215,15 +215,15 @@ export async function assembleProfileSCandidate(options = {}) {
     ),
   });
 
-  console.log("==> 1. Locating plugin development source...");
   const resolvedSource = sourceRoot
     ? {
         sourceDir: sourceRoot,
         deployDir: path.join(outputDir, consumer),
-        bootstrapFile: `${consumer}.php`,
-        entry: TARGET_REGISTRY[consumer] || { bootstrapFile: `${consumer}.php` },
+        bootstrapFile: options.bootstrapFile || TARGET_REGISTRY[consumer]?.bootstrapFile || `${consumer}.php`,
+        entry: TARGET_REGISTRY[consumer] || { bootstrapFile: options.bootstrapFile || `${consumer}.php` },
       }
     : await resolveConsumerSource({ contentRoot, consumer, pluginsDir: pluginsDirArg });
+  const bootstrapFile = options.bootstrapFile || resolvedSource.bootstrapFile || `${consumer}.php`;
   const devDir = resolvedSource.sourceDir;
 
   const stagingRoot = await (await import("node:fs/promises")).mkdtemp(path.join(os.tmpdir(), `profile-s-${consumer}-`));
@@ -288,6 +288,8 @@ export async function assembleProfileSCandidate(options = {}) {
         sourceComposerModel,
         inlineFramework: true,
         frameworkProvider: buildPlan.source.frameworkProvider,
+        bootstrapFile,
+        consumerNamespace: options.consumerNamespace || buildPlan.source?.consumerNamespace || null,
       });
       if (inlined.inlinedFiles > 0) {
         console.log(`==> Inlined ${inlined.inlinedFiles} WPDev framework files into self-contained staging tree!`);
@@ -448,42 +450,35 @@ export async function assembleProfileSCandidate(options = {}) {
 
       const candidateDirs = ["src", "includes", "inc", "classes", "src/FrameworkClosure"].filter(d => fs.existsSync(path.join(stagingPlugin, d)));
       
-      // Auto-discover any register and helper files in src/
-      const discoveredFiles = new Set();
-      if (fs.existsSync(path.join(stagingPlugin, "src/FrameworkClosure/functions-closure.php"))) {
-        discoveredFiles.add("src/FrameworkClosure/functions-closure.php");
-      }
-      for (const f of (compData.autoload?.["files"] || [])) {
-        discoveredFiles.add(f);
-      }
-      for (const dir of ["src", "includes", "inc", "src/FrameworkClosure"]) {
-        const fullDir = path.join(stagingPlugin, dir);
-        if (fs.existsSync(fullDir)) {
-          const files = fs.readdirSync(fullDir);
-          for (const f of files) {
-            if (f.endsWith("-register.php") || f.endsWith("-functions.php") || f.startsWith("functions-") || f === "helpers.php") {
-              discoveredFiles.add(`${dir}/${f}`);
-            }
-          }
-        }
-      }
-
-      // R01 validation: missing declared autoload.files must throw error, never silently filter
-      const finalAutoloadFiles = [];
-      for (const f of discoveredFiles) {
-        if (fs.existsSync(path.join(stagingPlugin, f))) {
-          finalAutoloadFiles.push(f);
-        } else if (compData.autoload?.files?.includes(f)) {
+      // Preserve declared autoload.files in exact order, adding only proven closure entries
+      const declaredFiles = Array.isArray(compData.autoload?.files) ? compData.autoload.files : [];
+      for (const f of declaredFiles) {
+        if (!fs.existsSync(path.join(stagingPlugin, f))) {
           throw new Error(`Declared autoload file '${f}' does not exist in staging tree`);
         }
       }
+      const finalAutoloadFiles = [...declaredFiles];
+      const closureFunctions = "src/FrameworkClosure/functions-closure.php";
+      if (fs.existsSync(path.join(stagingPlugin, closureFunctions)) && !finalAutoloadFiles.includes(closureFunctions)) {
+        finalAutoloadFiles.unshift(closureFunctions);
+      }
+
+      // Preserve declared autoload.classmap in exact order, adding candidate directories for mangled symbol dumping
+      const declaredClassmap = Array.isArray(compData.autoload?.classmap) ? compData.autoload.classmap : [];
+      for (const item of declaredClassmap) {
+        if (!fs.existsSync(path.join(stagingPlugin, item))) {
+          throw new Error(`Declared autoload classmap path '${item}' does not exist in staging tree`);
+        }
+      }
+      const closureCandidateDirs = candidateDirs.map(d => d.endsWith("/") ? d : d + "/");
+      const mergedClassmap = [...new Set([...declaredClassmap, ...(closureCandidateDirs.length > 0 ? closureCandidateDirs : ["./"])])];
 
       const tempComp = {
         ...compData,
         name: compData.name || "release/" + consumer,
         autoload: {
           ...(compData.autoload || {}),
-          "classmap": candidateDirs.length > 0 ? candidateDirs.map(d => d + "/") : ["./"],
+          "classmap": mergedClassmap,
           "psr-4": {
             ...(compData.autoload?.["psr-4"] || {}),
             "WPDev\\": "src/FrameworkClosure/Core/",
@@ -494,7 +489,17 @@ export async function assembleProfileSCandidate(options = {}) {
       await writeFile(path.join(stagingPlugin, "composer.json"), JSON.stringify(tempComp, null, 2), "utf8");
       console.log("==> Dumping optimized Composer classmap for mangled symbols...");
       await exec("composer", ["dump-autoload", "--no-dev", "--optimize", "--no-scripts", "--no-plugins"], { cwd: stagingPlugin });
-      await writeFile(path.join(stagingPlugin, "composer.json"), JSON.stringify(compData, null, 2), "utf8");
+
+      // Restore composer.json preserving declared classmap and proven closure files
+      const restoredCompData = {
+        ...compData,
+        autoload: {
+          ...(compData.autoload || {}),
+          ...(declaredClassmap.length > 0 ? { classmap: declaredClassmap } : {}),
+          ...(finalAutoloadFiles.length > 0 ? { files: finalAutoloadFiles } : {}),
+        }
+      };
+      await writeFile(path.join(stagingPlugin, "composer.json"), JSON.stringify(restoredCompData, null, 2), "utf8");
 
       const classmapFile = path.join(stagingPlugin, "vendor/composer/autoload_classmap.php");
       const mapFile = path.join(stagingRoot, "symbol-map.json");
