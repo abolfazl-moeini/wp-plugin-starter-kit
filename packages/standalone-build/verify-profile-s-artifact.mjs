@@ -20,12 +20,19 @@ import { lstat, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
-import { readZipEntries } from "./canonical-artifact-manifest.mjs";
+import { readZipEntries, verifyZipAgainstManifest } from "./canonical-artifact-manifest.mjs";
 
 const execFileAsync = promisify(execFile);
 
-export async function verifyProfileSArtifact({ zipPath, consumer = "tavangary-theme-panel" }) {
+export async function verifyProfileSArtifact({
+  zipPath,
+  consumer = "tavangary-theme-panel",
+  profile = "s",
+  stripComments,
+  targetPhp = "7.4",
+  phpBin,
+  requireManifest = true,
+} = {}) {
   const failures = [];
   const results = {
     zipPath,
@@ -67,13 +74,17 @@ export async function verifyProfileSArtifact({ zipPath, consumer = "tavangary-th
         };
       }
     }
-    await execFileAsync("unzip", ["-q", zipPath, "-d", stagingRoot]);
+    const immutableZipPath = path.join(stagingRoot, ".immutable-candidate.zip");
+    await writeFile(immutableZipPath, zipBytes, { flag: "wx", mode: 0o444 });
+    await execFileAsync("unzip", ["-q", immutableZipPath, "-d", stagingRoot]);
 
     // Check single-root archive topology
     const topDirs = await readdir(stagingRoot);
     if (!topDirs.includes(consumer)) {
       failures.push(`ZIP archive does not contain root directory ${consumer}/`);
     }
+
+    const activePhpBin = phpBin || process.env.WPDEV_PHP_BIN || process.env.WPDEV_PHP74_BIN || "php";
 
     // Probe 1 & 2: Fast Batched PHP Syntax lint & Comment Stripping Check
     const phpFiles = [];
@@ -137,7 +148,7 @@ export async function verifyProfileSArtifact({ zipPath, consumer = "tavangary-th
     const chunkSize = 100;
     for (let i = 0; i < phpFiles.length; i += chunkSize) {
       const chunk = phpFiles.slice(i, i + chunkSize);
-      const { stdout } = await execFileAsync("php", ["-r", batchScript, "--", `${consumer}.php`, ...chunk]);
+      const { stdout } = await execFileAsync(activePhpBin, ["-r", batchScript, "--", `${consumer}.php`, ...chunk]);
       const res = JSON.parse(stdout.trim());
       if (res.syntaxErrors && res.syntaxErrors.length > 0) {
         syntaxPassed = false;
@@ -161,7 +172,19 @@ export async function verifyProfileSArtifact({ zipPath, consumer = "tavangary-th
       results.details.push({ test: "PHP Syntax Lint", status: "failed" });
     }
 
-    if (commentStrippingPassed) {
+    const expectStripComments = stripComments !== undefined
+      ? Boolean(stripComments)
+      : (profile === "s");
+
+    if (!expectStripComments) {
+      results.testsPassed++;
+      results.details.push({
+        test: "Comment Stripping & Header Preservation",
+        status: "passed",
+        skipped: true,
+        notes: "Comment stripping not demanded for clean/custom profile",
+      });
+    } else if (commentStrippingPassed) {
       results.testsPassed++;
       results.details.push({ test: "Comment Stripping & Header Preservation", status: "passed" });
     } else {
@@ -262,13 +285,55 @@ $wpdb = $GLOBALS['wpdb'];
 
 function dbDelta($queries = '') { return []; }
 
+function __return_true() { return true; }
+function __return_false() { return false; }
+function __return_empty_array() { return []; }
+function __return_empty_string() { return ''; }
+function __return_null() { return null; }
+function __return_zero() { return 0; }
+
+$invalid_registered_callbacks = [];
+
+function wpdev_is_valid_hook_callback($callback) {
+    if (is_callable($callback)) {
+        return true;
+    }
+    if (is_string($callback) && function_exists($callback)) {
+        return true;
+    }
+    if (is_array($callback) && count($callback) === 2) {
+        [$target, $method] = $callback;
+        if (is_object($target) && method_exists($target, $method)) {
+            return true;
+        }
+        if (is_string($target) && (method_exists($target, $method) || class_exists($target))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function add_action($hook, $callback, $priority = 10, $accepted_args = 1) {
-    global $wp_actions;
+    global $wp_actions, $invalid_registered_callbacks;
+    if (!wpdev_is_valid_hook_callback($callback)) {
+        $invalid_registered_callbacks[] = [
+            'type' => 'action',
+            'hook' => $hook,
+            'callback' => is_scalar($callback) ? (string)$callback : (is_array($callback) ? json_encode($callback) : gettype($callback)),
+        ];
+    }
     $wp_actions[$hook][] = $callback;
     return true;
 }
 function add_filter($hook, $callback, $priority = 10, $accepted_args = 1) {
-    global $wp_filters;
+    global $wp_filters, $invalid_registered_callbacks;
+    if (!wpdev_is_valid_hook_callback($callback)) {
+        $invalid_registered_callbacks[] = [
+            'type' => 'filter',
+            'hook' => $hook,
+            'callback' => is_scalar($callback) ? (string)$callback : (is_array($callback) ? json_encode($callback) : gettype($callback)),
+        ];
+    }
     $wp_filters[$hook][] = $callback;
     return true;
 }
@@ -322,7 +387,11 @@ function do_action($hook, ...$args) {
     global $wp_actions;
     if (isset($wp_actions[$hook])) {
         foreach ($wp_actions[$hook] as $cb) {
-            if (is_callable($cb)) call_user_func_array($cb, $args);
+            if (!is_callable($cb)) {
+                echo "ERROR: Attempted to execute uncallable callback for hook '{$hook}': " . (is_string($cb) ? $cb : json_encode($cb)) . "\n";
+                exit(4);
+            }
+            call_user_func_array($cb, $args);
         }
     }
 }
@@ -330,7 +399,11 @@ function apply_filters($hook, $value, ...$args) {
     global $wp_filters;
     if (isset($wp_filters[$hook])) {
         foreach ($wp_filters[$hook] as $cb) {
-            if (is_callable($cb)) $value = call_user_func_array($cb, array_merge([$value], $args));
+            if (!is_callable($cb)) {
+                echo "ERROR: Attempted to execute uncallable callback for filter '{$hook}': " . (is_string($cb) ? $cb : json_encode($cb)) . "\n";
+                exit(4);
+            }
+            $value = call_user_func_array($cb, array_merge([$value], $args));
         }
     }
     return $value;
@@ -369,11 +442,45 @@ if (!file_exists($main_file)) {
 
 require_once $main_file;
 
+$all_invalid_callbacks = [];
+foreach ($invalid_registered_callbacks as $entry) {
+    if (!is_callable($entry['callback'])) {
+        $all_invalid_callbacks[] = "{$entry['type']} '{$entry['hook']}': {$entry['callback']}";
+    }
+}
+if (isset($wp_actions)) {
+    foreach ($wp_actions as $hook => $callbacks) {
+        foreach ($callbacks as $cb) {
+            if (!is_callable($cb)) {
+                $desc = is_scalar($cb) ? (string)$cb : (is_array($cb) ? json_encode($cb) : gettype($cb));
+                $all_invalid_callbacks[] = "action '{$hook}': {$desc}";
+            }
+        }
+    }
+}
+if (isset($wp_filters)) {
+    foreach ($wp_filters as $hook => $callbacks) {
+        foreach ($callbacks as $cb) {
+            if (!is_callable($cb)) {
+                $desc = is_scalar($cb) ? (string)$cb : (is_array($cb) ? json_encode($cb) : gettype($cb));
+                $all_invalid_callbacks[] = "filter '{$hook}': {$desc}";
+            }
+        }
+    }
+}
+if (!empty($all_invalid_callbacks)) {
+    $unique = array_values(array_unique($all_invalid_callbacks));
+    echo "ERROR: Invalid or uncallable callbacks detected in hook registration:\n" . implode("\n", $unique) . "\n";
+    exit(3);
+}
+
 if (isset($wp_actions['init'])) {
     foreach ($wp_actions['init'] as $cb) {
-        if (is_callable($cb)) {
-            call_user_func($cb);
+        if (!is_callable($cb)) {
+            echo "ERROR: Uncallable callback registered on 'init'\n";
+            exit(5);
         }
+        call_user_func($cb);
     }
 }
 
@@ -397,7 +504,7 @@ echo "REGISTERED_FILTERS_COUNT: " . count($wp_filters) . "\n";
     await writeFile(runnerFile, testRunnerCode, "utf8");
 
     try {
-      const { stdout, stderr } = await execFileAsync("php", [runnerFile]);
+      const { stdout, stderr } = await execFileAsync(activePhpBin, [runnerFile]);
       if (stdout.includes("BOOTSTRAP_PROBE_OK")) {
         results.testsPassed++;
         results.details.push({ test: "Zero-Fatal Bootstrap & Hook Registration", status: "passed", stdout: stdout.trim() });
@@ -407,26 +514,52 @@ echo "REGISTERED_FILTERS_COUNT: " . count($wp_filters) . "\n";
         results.details.push({ test: "Zero-Fatal Bootstrap & Hook Registration", status: "failed", error: stdout });
       }
     } catch (err) {
-      failures.push(`Execution exception in bootstrap probe: ${err.message}`);
+      const output = [err.stdout, err.stderr].filter(Boolean).join("\n").trim();
+      failures.push(`Execution exception in bootstrap probe: ${output || err.message}`);
       results.testsFailed++;
-      results.details.push({ test: "Zero-Fatal Bootstrap & Hook Registration", status: "failed", error: err.message });
+      results.details.push({ test: "Zero-Fatal Bootstrap & Hook Registration", status: "failed", error: output || err.message });
     }
 
-    // Probe 6: Release Topology & File Inventory Verification
+    // Probe 6: Release Manifest & Parity Verification
     const manifestFile = path.join(extractedPlugin, "release-manifest.json");
-    try {
-      if (await (async () => { try { return (await lstat(manifestFile)).isFile(); } catch { return false; } })()) {
-        const manifestData = JSON.parse(await readFile(manifestFile, "utf8"));
-        results.testsPassed++;
-        results.details.push({ test: "Release Manifest Verification", status: "passed", fileCount: manifestData.files ? manifestData.files.length : "present" });
-      } else {
-        results.testsPassed++;
-        results.details.push({ test: "Release Topology & File Inventory Verification", status: "passed" });
-      }
-    } catch (err) {
-      failures.push(`Manifest verification error: ${err.message}`);
+    const altManifestFile = path.join(extractedPlugin, "artifact-manifest.json");
+    const hasManifest = fs.existsSync(manifestFile) || fs.existsSync(altManifestFile);
+
+    if (requireManifest && !hasManifest) {
+      failures.push("Release manifest (release-manifest.json or artifact-manifest.json) is missing from release archive");
       results.testsFailed++;
-      results.details.push({ test: "Release Manifest Verification", status: "failed", error: err.message });
+      results.details.push({ test: "Release Manifest Verification", status: "failed", error: "Release manifest missing" });
+    } else if (hasManifest) {
+      try {
+        const activeManifestPath = fs.existsSync(manifestFile) ? manifestFile : altManifestFile;
+        const manifestData = JSON.parse(await readFile(activeManifestPath, "utf8"));
+        const zipParity = await verifyZipAgainstManifest({
+          zipPath: immutableZipPath,
+          consumer,
+          manifest: manifestData,
+        });
+        if (zipParity.status !== "valid") {
+          const blockerMsg = (zipParity.blockers || []).join("; ");
+          failures.push(`Manifest verification failed: ${blockerMsg}`);
+          results.testsFailed++;
+          results.details.push({ test: "Release Manifest Verification", status: "failed", blockers: zipParity.blockers });
+        } else {
+          results.testsPassed++;
+          results.details.push({
+            test: "Release Manifest Verification",
+            status: "passed",
+            manifestDigest: manifestData.manifestDigest,
+            verifiedFiles: zipParity.verifiedFilesCount || manifestData.files?.length,
+          });
+        }
+      } catch (err) {
+        failures.push(`Manifest verification error: ${err.message}`);
+        results.testsFailed++;
+        results.details.push({ test: "Release Manifest Verification", status: "failed", error: err.message });
+      }
+    } else {
+      results.testsPassed++;
+      results.details.push({ test: "Release Manifest Verification", status: "passed", skipped: true, notes: "Manifest not required" });
     }
 
   } finally {

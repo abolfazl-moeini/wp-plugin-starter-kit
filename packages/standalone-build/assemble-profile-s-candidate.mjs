@@ -30,6 +30,7 @@ import {
 import { purgeDevelopmentTree, getRsyncExcludeArgs } from "./dev-purge-policy.mjs";
 import { validateClassCompleteness } from "./class-completeness-gate.mjs";
 import { createCanonicalZip, generateArtifactManifest, normalizeStagingTree, readZipEntries, verifyZipAgainstManifest } from "./canonical-artifact-manifest.mjs";
+import { verifyProfileSArtifact } from "./verify-profile-s-artifact.mjs";
 import { resolveConsumerSource, TARGET_REGISTRY } from "./target-registry.mjs";
 import {
   assertDuckTypedModuleLoaders,
@@ -593,6 +594,23 @@ export async function assembleProfileSCandidate(options = {}) {
     }
     console.log("==> ZIP manifest parity verified 100% valid (0 missing, 0 unexpected, 0 modified)!");
 
+    console.log("==> 8c. Running black-box verification probes on staged candidate ZIP...");
+    const verifyReport = await verifyProfileSArtifact({
+      zipPath: stagedCandidateZip,
+      consumer,
+      profile,
+      stripComments: buildPlan.capabilities.stripComments,
+      targetPhp: buildPlan.targetPhp,
+      phpBin: targetInterpreter.bin,
+      requireManifest: true,
+    });
+    if (verifyReport.status !== "passed" || verifyReport.testsFailed > 0) {
+      throw new Error(
+        `Packaged candidate ZIP failed black-box verification probes:\n${JSON.stringify(verifyReport, null, 2)}`
+      );
+    }
+    console.log(`==> Black-box verification verified 100% green (${verifyReport.testsPassed} probes passed, 0 failed)!`);
+
     // Verify external harness preparation on candidate
     console.log("==> 9. Testing external harness preparation gate...");
     const harnessRes = await exec(process.execPath, [
@@ -605,6 +623,12 @@ export async function assembleProfileSCandidate(options = {}) {
     console.log("==> Harness preparation gate verified:", JSON.parse(harnessRes.stdout).status);
 
     // 10. Publication: ONLY publish to outputDir after ALL gates pass!
+    const prePublishBytes = await readFile(stagedCandidateZip);
+    const prePublishSha = crypto.createHash("sha256").update(prePublishBytes).digest("hex");
+    if (prePublishSha !== zipSha256) {
+      throw new Error(`Candidate ZIP hash mismatch before publication (staged: ${zipSha256}, pre-publish: ${prePublishSha})`);
+    }
+
     await mkdir(outputDir, { recursive: true });
     const targetArtifactName = resolveArtifactZipName(buildPlan);
     const outputZip = path.join(outputDir, targetArtifactName);
@@ -635,6 +659,7 @@ export async function assembleProfileSCandidate(options = {}) {
       capabilities: buildPlan.capabilities,
       planFingerprint: buildPlan.artifactIdentity.fingerprint,
       toolchain,
+      targetPhp: buildPlan.targetPhp,
       stage: "feasibility-prototype",
       inputProfileAZipSha256: baselineSha,
       sourceBaselineSha256: baselineSha,
@@ -642,7 +667,14 @@ export async function assembleProfileSCandidate(options = {}) {
       outputProfileSZipSha256: zipSha256,
       distRoot: targetDir,
       manifest: artifactManifest,
+      manifestDigest: artifactManifest.manifestDigest,
       signing: "not-performed; external trusted signing required",
+      verification: {
+        status: "passed",
+        probesPassed: verifyReport.testsPassed,
+        probesFailed: 0,
+        harnessStatus: JSON.parse(harnessRes.stdout).status,
+      },
       status: "experimental-candidate-assembled",
     };
     console.log(JSON.stringify(result, null, 2));
