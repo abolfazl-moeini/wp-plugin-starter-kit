@@ -32,6 +32,14 @@ Transform clean modular source code during the build stage (`dist/`) into an **u
 - **Line in the Sand (خط قرمز پروژه): ZERO FUNCTIONAL REGRESSIONS.**
   The transformed plugin must exhibit 100% execution, runtime, hook, REST, Ajax, translation, and database parity with the clean original source.
 
+  > **Evidence status — read before quoting this invariant.** This is a _requirement_, not a
+  > measured result. The canonical suite has been run at `--tier=full` and `--tier=fast`, but as
+  > of this revision no isolated WP/WooCommerce acceptance run and no final consumer release ZIP
+  > exist, and the target-runtime (PHP 7.4) gate has never been exercised against a real 7.4
+  > interpreter on the build machine. Treat "zero regressions" as unproven until those runs are
+  > recorded. Fix-plan v2 Task 12 requires the "unconditional zero regression" wording to be
+  > removed from the docs for exactly this reason.
+
 ---
 
 ## 2. The Three Strategic Plans (Evolution & Architecture)
@@ -65,7 +73,7 @@ The protection system was developed through three distinct architectural plans d
 │ [Plan 3: Safe AST Obfuscator & Spaghettification Engine (Profile S)]                    │
 │ ├─ Step 1: Rector PHP 7.4 Syntax Downgrade (PHP 8.x -> 7.4 compatibility)              │
 │ ├─ Step 2: Inlining Framework Closure (inline-wpdev-closure.mjs)                       │
-│ ├─ Step 3: AST/Token Transformer (plan3/transformer.php & safe-ast-obfuscator.php)     │
+│ ├─ Step 3: AST/Token Transformer (plan3/transformer.php)                                │
 │ │   ├─ Symbol Mangling: Classes (_c_...), Functions (_f_...), Variables ($_v_...)     │
 │ │   ├─ 100% DocBlock & Comment Stripping (Preserves WordPress plugin header)           │
 │ │   ├─ Whitespace Compaction (Minification & Spaghetti inlining)                       │
@@ -115,15 +123,15 @@ packages/standalone-build/
 ├── rector-downgrade-php74.php         # AST Rector downgrade pass (PHP >=8.0 down to PHP 7.4)
 ├── plan3/
 │   └── transformer.php                # High-speed token/AST symbol mangler & spaghettifier
-├── safe-ast-obfuscator.php            # Token-safe AST obfuscator engine
-├── heavy-obfuscator.php               # Deep control-flow flattening and symbol mangler
+├── safe-ast-obfuscator.php            # LEGACY — NOT in the active path (see §3.2)
+├── heavy-obfuscator.php               # LEGACY — NOT in the active path (see §3.2)
 ├── verify-profile-s-artifact.mjs      # Black-box runtime & syntax verifier for assembled ZIPs
 ├── canonical-artifact-manifest.mjs    # Single-root ZIP & embedded SHA-256 manifest inspector
 ├── deploy-standalone-plugin.mjs       # Atomic deployment engine with sibling staging
 ├── SOP_PRODUCTION_PLUGIN_DEPLOYMENT.md # Deployment Standard Operating Procedure
-├── test-dependency-registry.mjs       # Single source of truth for test metadata & 72 canonical test files
+├── test-dependency-registry.mjs       # Single source of truth for test metadata & 81 canonical test files
 ├── test-impact-map.mjs                # Git diff -> Impacted test suite resolver
-└── tests/                             # 72 canonical hermetic test suites (509+ subtests)
+└── tests/                             # 81 canonical hermetic test suites
 ```
 
 ### 3.1 The 6-Stage Build Execution Flow
@@ -159,11 +167,23 @@ When running `node packages/standalone-build/build-all-standalone-plugins.mjs --
      - Performs atomic directory rename.
      - If anything fails, triggers automatic fail-closed rollback.
 
+### 3.2 Retired Tooling (do not use)
+
+`safe-ast-obfuscator.php` and `heavy-obfuscator.php` are **legacy, separately-callable utilities
+that the assembler never invokes**. This is verified: grepping the package for either name while
+excluding `tests/` and `node_modules/` returns zero hits, and the only active obfuscation stage is
+`plan3/transformer.php`, invoked from `assemble-profile-s-candidate.mjs`.
+
+They remain in the tree only because a test (`tests/safe-ast-obfuscator.test.mjs`) and the test
+registry still reference them. Do **not** substitute either as the spaghetti stage, and never
+route a failed Profile S build to them. Fix-plan v2 (R18 / Task 12) asks for them to be deleted or
+moved to `dev/legacy/` behind a "NOT active" header; that move is still outstanding.
+
 ---
 
 ## 4. Preservation Contracts: What the Obfuscator NEVER Touches
 
-To guarantee **zero runtime regressions**, `plan3/transformer.php` and `safe-ast-obfuscator.php` enforce strict whitelist preservation rules:
+To guarantee **zero runtime regressions**, `plan3/transformer.php` enforces strict whitelist preservation rules:
 
 ### A. WordPress Core APIs & Globals
 
@@ -193,17 +213,19 @@ To guarantee **zero runtime regressions**, `plan3/transformer.php` and `safe-ast
 
 ### 5.1 Test Suites & Tiers (`CANONICAL_TEST_REGISTRY`)
 
-The package includes **72 canonical hermetic test suites** registered in `packages/standalone-build/test-dependency-registry.mjs`:
+The package includes **81 canonical hermetic test suites** registered in `packages/standalone-build/test-dependency-registry.mjs`:
 
-| Tier               | File Count | Scope & Purpose                                                                                                                       |
-| :----------------- | :--------: | :------------------------------------------------------------------------------------------------------------------------------------ |
-| **`unit`**         |  18 files  | Fast, isolated tests for utilities, parsers, and manifest inspectors.                                                                 |
-| **`contract`**     |  35 files  | Verifies structural contracts, fail-closed gates, and schema invariants.                                                              |
-| **`fast`**         |  53 files  | Combined `unit` + `contract` (~8s execution time).                                                                                    |
-| **`meta`**         |   1 file   | Tests the test runner and scheduler itself (`test-scheduler-and-tiers.test.mjs`) with isolated synthetic fixtures.                    |
-| **`integration`**  |  2 files   | End-to-end build and pipeline verification.                                                                                           |
-| **`full`**         |  72 files  | Complete canonical test inventory.                                                                                                    |
-| **`docker-smoke`** |   1 file   | Docker container smoke test (`tests-docker/docker-runtime-smoke.test.mjs`), validating standalone artifacts in an isolated container. |
+| Tier               | File Count | Scope & Purpose                                                                                                                                                                                                          |
+| :----------------- | :--------: | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`unit`**         |  29 files  | Fast, isolated tests for utilities, parsers, and manifest inspectors.                                                                                                                                                    |
+| **`contract`**     |  49 files  | Verifies structural contracts, fail-closed gates, and schema invariants.                                                                                                                                                 |
+| **`fast`**         |  78 files  | Combined `unit` + `contract`.                                                                                                                                                                                            |
+| **`meta`**         |   1 file   | Tests the test runner and scheduler itself (`test-scheduler-and-tiers.test.mjs`) with isolated synthetic fixtures.                                                                                                       |
+| **`integration`**  |  2 files   | End-to-end build and pipeline verification.                                                                                                                                                                              |
+| **`full`**         |  81 files  | Complete canonical test inventory.                                                                                                                                                                                       |
+| **`docker-smoke`** |   1 file   | Docker container smoke test (`tests-docker/docker-runtime-smoke.test.mjs`), validating standalone artifacts in an isolated container. **Not registered in `CANONICAL_TEST_REGISTRY`, so `--tier=full` does not run it.** |
+
+> **Environment prerequisites for a green run:** `php`, `composer`, `zip`, `unzip`, and `rsync` must all be on `PATH`. The preflight fails closed with a remediation hint if any is missing. On a machine without Composer, five suites fail (`f12`, `f08`, `profile-s-fail-closed`) — those are missing-prerequisite failures, not pipeline defects. Running inside a sandbox that intercepts bulk deletes can also fail `verify-composer-staging` and `pipeline-failure-and-rollback`.
 
 ### 5.2 Key Remediation Milestones (History of Fixes)
 
@@ -279,4 +301,7 @@ When working on this repository, **you must strictly adhere to the following inv
 4. **Preserve All Public Contracts:**
    If you add or modify transformer rules, always verify that WordPress hooks, filters, WooCommerce overrides, and gettext translation strings remain 100% untouched.
 5. **Run the Full Test Suite Before Committing:**
-   Run `npm test` and verify that all 72 test suites pass with zero skips and zero failures.
+   Run `npm test` and verify that all **81** registered test suites pass. Ensure `php`, `composer`,
+   `zip`, `unzip`, and `rsync` are on `PATH` first — the preflight fails closed otherwise, and the
+   resulting failures are missing-prerequisite errors rather than real regressions. `--tier=full`
+   covers the 81 registered suites only; the Docker smoke test lives outside the registry.

@@ -868,6 +868,23 @@ export const CANONICAL_TEST_REGISTRY = {
     "releaseSameRun": false,
     "tier": "unit"
   },
+  "v4-review-fixes.test.mjs": {
+    "tools": [
+      "tools/build-cache-engine.mjs",
+      "tools/profile-s-fail-closed.mjs"
+    ],
+    "artifacts": [],
+    "requiredBy": [],
+    "criticality": "normal",
+    "allowedModes": [
+      "affected",
+      "fast",
+      "full",
+      "release"
+    ],
+    "releaseSameRun": false,
+    "tier": "unit"
+  },
   "tavangary-core-artifact.test.mjs": {
     "tools": [
       "tools/assemble-profile-s-candidate.mjs",

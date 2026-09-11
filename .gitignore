@@ -8,6 +8,7 @@ wp-content/plugins/blockstudio/
 .idea/
 .vscode/
 .opencode/
+.workbuddy-ai/
 
 # Build output
 .dist/

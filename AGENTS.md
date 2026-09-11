@@ -44,7 +44,7 @@ wp-starter-kit/
 │   └── Adapters/                      # Bridges to WPDev admin framework
 │
 ├── packages/                          # Monorepo packages & sub-systems
-│   ├── standalone-build/              # Production assembler, Profile S AST obfuscator, WAL journal & 72 test suites
+│   ├── standalone-build/              # Production assembler, Profile S AST obfuscator, WAL journal & 81 test suites
 │   ├── create-wp-project/             # CLI scaffolder, feature catalog, migration engine & health doctor
 │   ├── cli/                           # wpdev CLI binary wrapper
 │   ├── wpdev-framework/               # Core admin framework (Admin pages, list tables, settings, field builders)
@@ -179,7 +179,7 @@ npm test
 # Run root PHPUnit tests
 composer test
 
-# Run standalone build test suites (72 canonical files)
+# Run standalone build test suites (81 canonical files)
 export WPDEV_CONTENT_ROOT="/path/to/wordpress/wp-content"
 cd packages/standalone-build && npm test
 ```
@@ -216,7 +216,7 @@ npm run add-feature -- --list
 
 1. **Test-Driven Development (TDD):**
    - Always write or update tests before or concurrently with code edits.
-   - When modifying `packages/standalone-build/`, verify that `packages/standalone-build/test-dependency-registry.mjs` remains synchronized with the 72 test suites.
+   - When modifying `packages/standalone-build/`, verify that `packages/standalone-build/test-dependency-registry.mjs` remains synchronized with the 81 test suites.
 2. **Never Edit Deployed/Active Plugin Folders Directly:**
    - Files under `/wordpress/wp-content/plugins/{slug}/` are generated build targets.
    - Always make code modifications in the source trees (`src/`, `packages/`, or `*-dev` folders), then run the build pipeline.

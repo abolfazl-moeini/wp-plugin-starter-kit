@@ -46,7 +46,7 @@ wp-starter-kit/packages/standalone-build/
 ├── canonical-artifact-manifest.mjs    # Single-root ZIP & embedded manifest inspector
 ├── deploy-standalone-plugin.mjs       # Thin CLI wrapper around atomicDeployPlugin (sibling staging)
 ├── SOP_PRODUCTION_PLUGIN_DEPLOYMENT.md # Never unzip onto the live plugin directory
-└── tests/                             # Hermetic unit, contract & artifact test suites (72 files, 509 tests)
+└── tests/                             # Hermetic unit, contract & artifact test suites (81 files)
 ```
 
 ---
@@ -163,7 +163,7 @@ ZIP entry order (bootstrap / `autoload.files` targets before `vendor/autoload.ph
 
 ### Running the Standalone Build Test Suite
 
-The build tool has its own comprehensive test suite (72 canonical files, 509 test declarations, 1,529 assertions) verifying token-based transformation, WAL rollback, inliner hygiene, and manifest stability:
+The build tool has its own comprehensive test suite (81 canonical files) verifying token-based transformation, WAL rollback, inliner hygiene, and manifest stability. A green run requires `php`, `composer`, `zip`, `unzip`, and `rsync` on `PATH`:
 
 ```bash
 cd /Users/moeini/Documents/ideas/extend-kit/wp-starter-kit/packages/standalone-build

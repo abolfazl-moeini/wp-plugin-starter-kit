@@ -543,63 +543,128 @@ class Plan3_Transformer {
 			}
 		}
 
-		// Check what precedes the array opening
+		return $this->array_open_in_callback_position( $tokens, $open_idx );
+	}
+
+	/**
+	 * True when the array literal opening at $open_idx sits in a position that is known to
+	 * consume a callable: an argument of a callback-taking function, or the value of a
+	 * callback-style array key.
+	 *
+	 * @param array $tokens
+	 * @param int   $open_idx Index of T_ARRAY or of the '[' of a short array.
+	 * @return bool
+	 */
+	protected function array_open_in_callback_position( $tokens, $open_idx ) {
 		$before_open = $this->prev_code_index( $tokens, $open_idx );
-		if ( $before_open >= 0 ) {
-			if ( is_array( $tokens[ $before_open ] ) && $tokens[ $before_open ][0] === T_DOUBLE_ARROW ) {
-				$key_idx = $this->prev_code_index( $tokens, $before_open );
-				if ( $key_idx >= 0 && is_array( $tokens[ $key_idx ] ) && $tokens[ $key_idx ][0] === T_CONSTANT_ENCAPSED_STRING ) {
-					$k_str = trim( $tokens[ $key_idx ][1], "'\"" );
-					return in_array( $k_str, self::$callback_array_keys, true );
-				}
-				return false;
+		if ( $before_open < 0 ) {
+			return false;
+		}
+		if ( is_array( $tokens[ $before_open ] ) && $tokens[ $before_open ][0] === T_DOUBLE_ARROW ) {
+			$key_idx = $this->prev_code_index( $tokens, $before_open );
+			if ( $key_idx >= 0 && is_array( $tokens[ $key_idx ] ) && $tokens[ $key_idx ][0] === T_CONSTANT_ENCAPSED_STRING ) {
+				$k_str = trim( $tokens[ $key_idx ][1], "'\"" );
+				return in_array( $k_str, self::$callback_array_keys, true );
 			}
-			if ( is_string( $tokens[ $before_open ] ) && ( $tokens[ $before_open ] === ',' || $tokens[ $before_open ] === '(' ) ) {
-				$paren_depth = ( $tokens[ $before_open ] === '(' ) ? 1 : 0;
-				$k = $before_open;
-				while ( $k >= 0 ) {
-					if ( is_string( $tokens[ $k ] ) ) {
-						if ( $tokens[ $k ] === ')' ) {
-							$paren_depth--;
-						} elseif ( $tokens[ $k ] === '(' ) {
-							$paren_depth++;
-							if ( $paren_depth === 1 ) {
-								$fn_idx = $this->prev_code_index( $tokens, $k );
-								if ( $fn_idx >= 0 ) {
-									$fn_name = strtolower( $this->token_function_name( $tokens[ $fn_idx ] ) );
-									$callback_funcs = array(
-										'add_action',
-										'add_filter',
-										'remove_action',
-										'remove_filter',
-										'has_action',
-										'has_filter',
-										'call_user_func',
-										'call_user_func_array',
-										'is_callable',
-										'register_activation_hook',
-										'register_deactivation_hook',
-										'register_shutdown_function',
-										'array_map',
-										'array_filter',
-										'usort',
-										'uasort',
-										'uksort',
-									);
-									if ( in_array( $fn_name, $callback_funcs, true ) ) {
-										return true;
-									}
-								}
-								break;
+			return false;
+		}
+		if ( ! is_string( $tokens[ $before_open ] ) || ( $tokens[ $before_open ] !== ',' && $tokens[ $before_open ] !== '(' ) ) {
+			return false;
+		}
+		// Start from zero in both cases: the loop counts the enclosing '(' itself when it reaches
+		// it. Seeding with 1 for an immediately-preceding '(' double-counted that token, so
+		// "paren_depth === 1" was never reached and no callback position ever resolved —
+		// add_action('x', array('Cls','m')) was left unrewritten and fatalled at runtime.
+		$paren_depth = 0;
+		$k          = $before_open;
+		while ( $k >= 0 ) {
+			if ( is_string( $tokens[ $k ] ) ) {
+				if ( $tokens[ $k ] === ')' ) {
+					$paren_depth--;
+				} elseif ( $tokens[ $k ] === '(' ) {
+					$paren_depth++;
+					if ( $paren_depth === 1 ) {
+						$fn_idx = $this->prev_code_index( $tokens, $k );
+						if ( $fn_idx >= 0 ) {
+							$fn_name = strtolower( $this->token_function_name( $tokens[ $fn_idx ] ) );
+							$callback_funcs = array(
+								'add_action',
+								'add_filter',
+								'remove_action',
+								'remove_filter',
+								'has_action',
+								'has_filter',
+								'call_user_func',
+								'call_user_func_array',
+								'is_callable',
+								'register_activation_hook',
+								'register_deactivation_hook',
+								'register_shutdown_function',
+								'array_map',
+								'array_filter',
+								'usort',
+								'uasort',
+								'uksort',
+							);
+							if ( in_array( $fn_name, $callback_funcs, true ) ) {
+								return true;
 							}
 						}
+						break;
 					}
-					$k = $this->prev_code_index( $tokens, $k );
 				}
 			}
+			$k = $this->prev_code_index( $tokens, $k );
 		}
 
 		return false;
+	}
+
+	/**
+	 * True when the string at $i is the *first* element of a two-element array literal whose
+	 * second element is a string, and that array is in a callback position — i.e. the
+	 * array('Class', 'method') callable form. The first element carries the class name and must
+	 * be remapped like any other class reference; the second element is covered by
+	 * is_array_callable_method_string().
+	 *
+	 * @param array $tokens
+	 * @param int   $i
+	 * @return bool
+	 */
+	protected function is_array_callable_class_string( $tokens, $i ) {
+		$count = count( $tokens );
+		$p     = $this->prev_code_index( $tokens, $i );
+		if ( $p < 0 || ! is_string( $tokens[ $p ] ) || ( $tokens[ $p ] !== '(' && $tokens[ $p ] !== '[' ) ) {
+			return false;
+		}
+
+		if ( $tokens[ $p ] === '(' ) {
+			$q = $this->prev_code_index( $tokens, $p );
+			if ( $q < 0 || ! is_array( $tokens[ $q ] ) || $tokens[ $q ][0] !== T_ARRAY ) {
+				return false;
+			}
+			$open_idx     = $q;
+			$close_marker = ')';
+		} else {
+			$open_idx     = $p;
+			$close_marker = ']';
+		}
+
+		// Shape check: string , string <close>
+		$n = $this->next_significant_token( $tokens, $i, $count );
+		if ( $n === null || ! is_string( $tokens[ $n ] ) || $tokens[ $n ] !== ',' ) {
+			return false;
+		}
+		$n = $this->next_significant_token( $tokens, $n, $count );
+		if ( $n === null || ! is_array( $tokens[ $n ] ) || $tokens[ $n ][0] !== T_CONSTANT_ENCAPSED_STRING ) {
+			return false;
+		}
+		$n = $this->next_significant_token( $tokens, $n, $count );
+		if ( $n === null || ! is_string( $tokens[ $n ] ) || $tokens[ $n ] !== $close_marker ) {
+			return false;
+		}
+
+		return $this->array_open_in_callback_position( $tokens, $open_idx );
 	}
 
 	protected function is_gettext_string( $tokens, $i ) {
@@ -911,6 +976,7 @@ class Plan3_Transformer {
 		$in_class   = 0;
 		$class_depth = 0;
 		$ns_brace_depth = 0;
+		$ns_blocks = array();
 
 		for ( $i = 0; $i < $count; $i++ ) {
 			$token = $tokens[ $i ];
@@ -950,6 +1016,9 @@ class Plan3_Transformer {
 			if ( $id === T_NAMESPACE ) {
 				$spec = $this->read_namespace_spec( $tokens, $i, $count );
 				$current_ns = $spec['name'];
+				if ( $spec['name'] !== '' ) {
+					$ns_blocks[ $spec['name'] ] = true;
+				}
 				if ( $spec['terminator'] === '{' ) {
 					$ns_brace_depth = 1;
 				}
@@ -989,6 +1058,14 @@ class Plan3_Transformer {
 				if ( $next < $count && is_array( $tokens[ $next ] ) && in_array( $tokens[ $next ][1], self::$frozen_public_classes, true ) ) {
 					$retained[ $current_ns ] = true;
 				}
+			}
+		}
+		// When a file declares more than one namespace block, flattening some and retaining
+		// others breaks: removing a later namespace declaration leaves its declarations inside
+		// the earlier retained namespace (R06). Fail-safe: keep all namespace blocks.
+		if ( count( $ns_blocks ) > 1 ) {
+			foreach ( array_keys( $ns_blocks ) as $ns ) {
+				$retained[ $ns ] = true;
 			}
 		}
 		return $retained;
@@ -1663,6 +1740,7 @@ class Plan3_Transformer {
 		$declared_classes_in_file = array();
 		$pending_ns_brace       = false;
 		$ns_brace_depth         = 0;
+		$retained_brace_namespace_emitted = false;
 		$current_class_fqcn     = '';
 		$pass2_interp_depth     = 0;
 
@@ -1783,6 +1861,9 @@ class Plan3_Transformer {
 							$file_retained_namespaces[] = $current_namespace;
 						}
 						if ( ! $this->flatten_namespaces || $keep_namespace ) {
+							if ( $pending_ns_brace ) {
+								$retained_brace_namespace_emitted = true;
+							}
 							$output .= 'namespace ' . $current_namespace;
 							if ( $spec['terminator'] === ';' ) {
 								$output .= ';';
@@ -2377,10 +2458,14 @@ class Plan3_Transformer {
 						continue;
 					}
 
-					$is_callback_string = $this->is_array_callable_method_string( $tokens, $i ) || $this->is_callback_key_string( $tokens, $i ) || $this->is_callback_argument_string( $tokens, $i );
+					$is_callable_method_string = $this->is_array_callable_method_string( $tokens, $i );
+					$is_callback_string = $is_callable_method_string || $this->is_callback_key_string( $tokens, $i ) || $this->is_callback_argument_string( $tokens, $i );
 					$is_reflection = $this->is_reflection_or_instantiation_string( $tokens, $i );
 
-					if ( isset( $this->class_map[ $norm_str ] ) && ( $is_reflection || $this->is_array_callable_method_string( $tokens, $i ) ) ) {
+					// array('Class', 'method'): the first element names the class and must be
+					// remapped, otherwise the registered callback points at a class that no longer
+					// exists (WordPress hook registrations use this form constantly).
+					if ( isset( $this->class_map[ $norm_str ] ) && ( $is_reflection || $is_callable_method_string || $this->is_array_callable_class_string( $tokens, $i ) ) ) {
 						$quote = $text[0];
 						$target = $this->class_map[ $norm_str ];
 						if ( ! $this->flatten_namespaces && substr( $raw_str, 0, 1 ) === '\\' ) {
@@ -2603,17 +2688,25 @@ class Plan3_Transformer {
 		}
 
 		if ( ! empty( $declared_classes_in_file ) && $this->flatten_namespaces && ! $keep_namespace && $this->mangle_symbols ) {
+			$alias_code = '';
 			foreach ( $declared_classes_in_file as $fqcn => $info ) {
 				$mangled = is_array( $info ) ? $info['mangled'] : $info;
 				$type    = is_array( $info ) ? $info['type'] : T_CLASS;
 				if ( $type === T_INTERFACE ) {
-					$output .= "\nif (interface_exists('" . addslashes( $mangled ) . "', false) && !interface_exists('" . addslashes( $fqcn ) . "', false)) { class_alias('" . addslashes( $mangled ) . "', '" . addslashes( $fqcn ) . "'); }\n";
+					$alias_code .= "if (interface_exists('" . addslashes( $mangled ) . "', false) && !interface_exists('" . addslashes( $fqcn ) . "', false)) { class_alias('" . addslashes( $mangled ) . "', '" . addslashes( $fqcn ) . "'); }\n";
 				} elseif ( $type === T_TRAIT ) {
-					$output .= "\nif (trait_exists('" . addslashes( $mangled ) . "', false) && !trait_exists('" . addslashes( $fqcn ) . "', false)) { class_alias('" . addslashes( $mangled ) . "', '" . addslashes( $fqcn ) . "'); }\n";
+					$alias_code .= "if (trait_exists('" . addslashes( $mangled ) . "', false) && !trait_exists('" . addslashes( $fqcn ) . "', false)) { class_alias('" . addslashes( $mangled ) . "', '" . addslashes( $fqcn ) . "'); }\n";
 				} elseif ( defined( 'T_ENUM' ) && $type === T_ENUM ) {
-					$output .= "\nif (function_exists('enum_exists') && enum_exists('" . addslashes( $mangled ) . "', false) && !enum_exists('" . addslashes( $fqcn ) . "', false)) { class_alias('" . addslashes( $mangled ) . "', '" . addslashes( $fqcn ) . "'); }\n";
+					$alias_code .= "if (function_exists('enum_exists') && enum_exists('" . addslashes( $mangled ) . "', false) && !enum_exists('" . addslashes( $fqcn ) . "', false)) { class_alias('" . addslashes( $mangled ) . "', '" . addslashes( $fqcn ) . "'); }\n";
 				} else {
-					$output .= "\nif (class_exists('" . addslashes( $mangled ) . "', false) && !class_exists('" . addslashes( $fqcn ) . "', false)) { class_alias('" . addslashes( $mangled ) . "', '" . addslashes( $fqcn ) . "'); }\n";
+					$alias_code .= "if (class_exists('" . addslashes( $mangled ) . "', false) && !class_exists('" . addslashes( $fqcn ) . "', false)) { class_alias('" . addslashes( $mangled ) . "', '" . addslashes( $fqcn ) . "'); }\n";
+				}
+			}
+			if ( $alias_code !== '' ) {
+				if ( $retained_brace_namespace_emitted ) {
+					$output .= "\nnamespace {\n" . $alias_code . "}\n";
+				} else {
+					$output .= "\n" . $alias_code;
 				}
 			}
 		}

@@ -35,8 +35,9 @@ export function getDefaultZipPath(consumer) {
       env: process.env,
     });
   } catch {
+    const localDist = path.resolve(process.cwd(), `dist/${consumer}-profile-s.zip`);
     const fallback = "/Users/moeini/Dev/tavangary.new/wordpress/wp-content";
-    if (fs.existsSync(fallback)) {
+    if (!fs.existsSync(localDist) && fs.existsSync(fallback)) {
       root = fallback;
     } else {
       root = process.cwd();

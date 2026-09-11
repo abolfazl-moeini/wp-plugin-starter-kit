@@ -23,6 +23,26 @@ const REQUIRED_BUILD_TOOLS = [
   ["composer", ["--version"]],
 ];
 
+// Remediation hints for the toolchain preflight. Without these, a missing binary surfaces as a
+// bare `spawn composer ENOENT`, which reads like a pipeline bug rather than a missing
+// prerequisite — and it does so from five different test files at once.
+const TOOLCHAIN_HINTS = {
+  php: "install PHP and put it on PATH, or pass --php-bin / set WPDEV_PHP_BIN",
+  zip: "install the `zip` CLI (e.g. `brew install zip`)",
+  unzip: "install the `unzip` CLI",
+  rsync: "install `rsync`",
+  composer: "install Composer (https://getcomposer.org/download/) and put it on PATH",
+};
+
+function describeToolchainFailure(command, err) {
+  const message = String(err?.message || err || "");
+  const notFound = err?.code === "ENOENT" || /ENOENT/.test(message);
+  const hint = TOOLCHAIN_HINTS[command] || "install it and ensure it is on PATH";
+  return notFound
+    ? `${command} is not installed or not on PATH (${hint})`
+    : `${command} failed to execute: ${message} (${hint})`;
+}
+
 function readArgValue(argv, index, flag) {
   const arg = argv[index];
   if (arg === flag) {
@@ -576,7 +596,7 @@ export async function collectToolchainEvidence({ rectorBin = null } = {}) {
     try {
       evidence[key] = await firstLineVersion(command, args);
     } catch (err) {
-      throw new Error(`Profile S toolchain preflight failed: ${command} (${err.message})`);
+      throw new Error(`Profile S toolchain preflight failed: ${describeToolchainFailure(command, err)}`);
     }
   }
   if (rectorBin) {
@@ -595,7 +615,7 @@ export async function assertRequiredBuildTools(commands = REQUIRED_BUILD_TOOLS) 
     try {
       await execFileAsync(command, args);
     } catch (err) {
-      missing.push(`${command} (${err.message})`);
+      missing.push(describeToolchainFailure(command, err));
     }
   }
   if (missing.length > 0) {
@@ -936,4 +956,13 @@ export async function validatePhpSyntaxTree(
   if (!stdout.includes("SYNTAX_OK")) {
     throw new Error(`PHP syntax error in transformed files: ${stdout || stderr}`);
   }
+  // V3-16: surface which interpreter actually performed this gate. Without this, callers
+  // cannot distinguish "validated on the declared target" from "validated on host PHP",
+  // and a 7.4 compatibility claim can be recorded on the back of an 8.x run.
+  return {
+    interpreter: { bin: interpreter.bin, version: interpreter.version },
+    targetPhp,
+    enforceTarget: Boolean(enforceTarget),
+    targetPhpVerified: interpreter.isExactTarget,
+  };
 }

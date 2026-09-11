@@ -207,13 +207,29 @@ export async function assembleProfileSCandidate(options = {}) {
   const exec = (file, args, extra = {}) => execFileAsync(file, args, signal ? { ...extra, signal } : extra);
   await assertRequiredBuildTools();
 
+  const enforceTargetPhp = Boolean(
+    parsed.enforceTargetPhp ?? options.enforceTargetPhp ?? (process.env.WPDEV_ENFORCE_TARGET_PHP === "1" || process.env.WPDEV_ENFORCE_TARGET_PHP === "true")
+  );
+
   const targetInterpreter = await resolveAndValidateTargetPhpInterpreter({
     targetPhp: buildPlan.targetPhp,
     phpBin: parsed.phpBin || options.phpBin || process.env.WPDEV_PHP_BIN || process.env.WPDEV_PHP74_BIN,
-    enforceTarget: Boolean(
-      parsed.enforceTargetPhp ?? options.enforceTargetPhp ?? (process.env.WPDEV_ENFORCE_TARGET_PHP === "1" || process.env.WPDEV_ENFORCE_TARGET_PHP === "true")
-    ),
+    enforceTarget: enforceTargetPhp,
   });
+
+  // V3-16: never silently claim target-runtime validation we did not actually perform.
+  // The PHP syntax gate below runs on `targetInterpreter.bin`. When that interpreter is not
+  // the declared target version, the target-compatibility claim is unproven — the gate is
+  // only a host-token blacklist. Make that explicit instead of passing silently.
+  const targetPhpVerified = targetInterpreter.isExactTarget;
+  if (!targetPhpVerified && !enforceTargetPhp) {
+    const envHint = `WPDEV_PHP${String(buildPlan.targetPhp).replace(".", "")}_BIN`;
+    console.warn(
+      `⚠️  Target PHP ${buildPlan.targetPhp} compatibility is UNVERIFIED for '${consumer}': ` +
+      `the syntax gate will run on PHP ${targetInterpreter.version} (${targetInterpreter.bin}). ` +
+      `Set ${envHint} to a real PHP ${buildPlan.targetPhp} binary, or pass --enforce-target-php to fail closed.`
+    );
+  }
 
   const resolvedSource = sourceRoot
     ? {
@@ -569,11 +585,13 @@ export async function assembleProfileSCandidate(options = {}) {
     await validatePhpSyntaxTree(stagingPlugin, {
       phpBin: targetInterpreter.bin,
       targetPhp: buildPlan.targetPhp,
-      enforceTarget: Boolean(
-        parsed.enforceTargetPhp ?? options.enforceTargetPhp ?? (process.env.WPDEV_ENFORCE_TARGET_PHP === "1" || process.env.WPDEV_ENFORCE_TARGET_PHP === "true")
-      ),
+      enforceTarget: enforceTargetPhp,
     });
-    console.log("==> PHP syntax check 100% green!");
+    console.log(
+      targetPhpVerified
+        ? `==> PHP syntax check green (verified on target PHP ${buildPlan.targetPhp}).`
+        : `==> PHP syntax check green on PHP ${targetInterpreter.version}; target PHP ${buildPlan.targetPhp} was NOT verified (see warning above).`
+    );
 
     const manifestProfile = profile === "s" ? "Profile S" : (profile === "clean" ? "clean" : String(buildPlan.artifactIdentity.capabilityTag));
     console.log(`==> 7. Generating canonical artifact manifest (profile: ${manifestProfile})...`);

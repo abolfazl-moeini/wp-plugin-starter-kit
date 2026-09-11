@@ -1546,10 +1546,16 @@ export function validateBuildCacheSchema(data, options = {}) {
     if (!isPlainObject(record)) {
       return { valid: false, reason: `Artifact record for '${consumer}' must be a plain object` };
     }
-    if (expectedSet && !expectedSet.has(consumer)) {
+    if (expectedSet && !expectedSet.has(consumer) && !isValidConsumerName(consumer)) {
       return { valid: false, reason: `Unexpected artifact consumer '${consumer}' in cache schema` };
     }
-    if (!ALLOWED_CONSUMERS.has(consumer)) {
+    // Structural gate only. ALLOWED_CONSUMERS is the set of *known* consumers, not the set
+    // of *permitted* ones: fix-plan v2 §10 says build descriptors may be generic while
+    // deployment authorization stays explicit. Gating the cache document on the hardcoded
+    // list made it permanently invalid for any scaffolded consumer — and because deploy and
+    // release modes throw on an invalid cache, that blocked deployment outright. This now
+    // matches the journal validator's escape hatch (build-cache-engine.mjs:156).
+    if (!ALLOWED_CONSUMERS.has(consumer) && !isValidConsumerName(consumer)) {
       return { valid: false, reason: `Disallowed artifact consumer '${consumer}' in cache schema` };
     }
     if (record.consumer !== consumer) {
