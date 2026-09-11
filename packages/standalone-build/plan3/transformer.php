@@ -524,15 +524,15 @@ class Plan3_Transformer {
 		while ( $next < $count && is_array( $tokens[ $next ] ) && $tokens[ $next ][0] === T_WHITESPACE ) {
 			$next++;
 		}
-		if ( $next < $count ) {
+		if ( $next < $count && is_string( $tokens[ $next ] ) && $tokens[ $next ] === ',' ) {
+			$next = $this->next_significant_token( $tokens, $next, $count );
+		}
+		if ( $next !== null && $next < $count ) {
 			$close_char = $is_short_array ? ']' : ')';
 			if ( is_string( $tokens[ $next ] ) && $tokens[ $next ] === $close_char ) {
-				$after_close = $next + 1;
-				while ( $after_close < $count && is_array( $tokens[ $after_close ] ) && $tokens[ $after_close ][0] === T_WHITESPACE ) {
-					$after_close++;
-				}
+				$after_close = $this->next_significant_token( $tokens, $next, $count );
 				// If followed by subscript '[' or object operator '->', it is data/expression indexing, NOT a callback!
-				if ( $after_close < $count ) {
+				if ( $after_close !== null && $after_close < $count ) {
 					if ( is_string( $tokens[ $after_close ] ) && $tokens[ $after_close ] === '[' ) {
 						return false;
 					}
@@ -660,6 +660,9 @@ class Plan3_Transformer {
 			return false;
 		}
 		$n = $this->next_significant_token( $tokens, $n, $count );
+		if ( $n !== null && is_string( $tokens[ $n ] ) && $tokens[ $n ] === ',' ) {
+			$n = $this->next_significant_token( $tokens, $n, $count );
+		}
 		if ( $n === null || ! is_string( $tokens[ $n ] ) || $tokens[ $n ] !== $close_marker ) {
 			return false;
 		}
@@ -762,7 +765,21 @@ class Plan3_Transformer {
 
 	protected function is_array_subscript_string( $tokens, $i ) {
 		$p = $this->prev_code_index( $tokens, $i );
-		return ( $p >= 0 && is_string( $tokens[ $p ] ) && $tokens[ $p ] === '[' );
+		if ( $p < 0 || ! is_string( $tokens[ $p ] ) || $tokens[ $p ] !== '[' ) {
+			return false;
+		}
+		$before = $this->prev_code_index( $tokens, $p );
+		if ( $before < 0 ) {
+			return false;
+		}
+		if ( is_string( $tokens[ $before ] ) ) {
+			return in_array( $tokens[ $before ], array( ')', ']', '}' ), true );
+		}
+		if ( is_array( $tokens[ $before ] ) ) {
+			$id = $tokens[ $before ][0];
+			return ( $id === T_VARIABLE || $id === T_STRING || $id === T_CONSTANT_ENCAPSED_STRING );
+		}
+		return false;
 	}
 
 	protected function record_short_function_name( $func_name, $mangled ) {
@@ -977,6 +994,7 @@ class Plan3_Transformer {
 		$class_depth = 0;
 		$ns_brace_depth = 0;
 		$ns_blocks = array();
+		$has_bracketed_ns = false;
 
 		for ( $i = 0; $i < $count; $i++ ) {
 			$token = $tokens[ $i ];
@@ -1016,11 +1034,12 @@ class Plan3_Transformer {
 			if ( $id === T_NAMESPACE ) {
 				$spec = $this->read_namespace_spec( $tokens, $i, $count );
 				$current_ns = $spec['name'];
-				if ( $spec['name'] !== '' ) {
-					$ns_blocks[ $spec['name'] ] = true;
-				}
 				if ( $spec['terminator'] === '{' ) {
+					$has_bracketed_ns = true;
+					$ns_blocks[ $spec['name'] ] = true;
 					$ns_brace_depth = 1;
+				} elseif ( $spec['name'] !== '' ) {
+					$ns_blocks[ $spec['name'] ] = true;
 				}
 				$i = $spec['end'];
 				continue;
@@ -1063,7 +1082,7 @@ class Plan3_Transformer {
 		// When a file declares more than one namespace block, flattening some and retaining
 		// others breaks: removing a later namespace declaration leaves its declarations inside
 		// the earlier retained namespace (R06). Fail-safe: keep all namespace blocks.
-		if ( count( $ns_blocks ) > 1 ) {
+		if ( count( $ns_blocks ) > 1 || ( $has_bracketed_ns && ! empty( $retained ) ) ) {
 			foreach ( array_keys( $ns_blocks ) as $ns ) {
 				$retained[ $ns ] = true;
 			}
@@ -1856,7 +1875,8 @@ class Plan3_Transformer {
 						$spec = $this->read_namespace_spec( $tokens, $i, $count );
 						$current_namespace = $spec['name'];
 						$pending_ns_brace = ( $spec['terminator'] === '{' );
-						$keep_namespace = ! empty( $current_namespace ) && isset( $this->retained_namespaces[ $current_namespace ] );
+						$keep_namespace = ( ! empty( $current_namespace ) && isset( $this->retained_namespaces[ $current_namespace ] ) )
+							|| ( $current_namespace === '' && $pending_ns_brace && ( isset( $this->retained_namespaces[''] ) || $retained_brace_namespace_emitted ) );
 						if ( $keep_namespace ) {
 							$file_retained_namespaces[] = $current_namespace;
 						}
@@ -1864,7 +1884,7 @@ class Plan3_Transformer {
 							if ( $pending_ns_brace ) {
 								$retained_brace_namespace_emitted = true;
 							}
-							$output .= 'namespace ' . $current_namespace;
+							$output .= ( $current_namespace !== '' ) ? ( 'namespace ' . $current_namespace ) : 'namespace';
 							if ( $spec['terminator'] === ';' ) {
 								$output .= ';';
 							}

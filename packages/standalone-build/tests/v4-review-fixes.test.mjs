@@ -181,3 +181,77 @@ test("V4: array callable class string remaps class name in callback position", a
     await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
 });
+
+test("V4: short array callable with trailing comma remaps while subscripts are preserved", async (t) => {
+  if (!hasPhp()) {
+    t.skip("php is not available on PATH");
+    return;
+  }
+  const transformerPhp = path.resolve(__dirname, "../plan3/transformer.php");
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "v4-short-callable-"));
+  try {
+    const source = "<?php namespace Acme;\n" +
+      "class Handler { public function exec() { return 'ok'; } }\n" +
+      "class Caller {\n" +
+      "    public function run() {\n" +
+      "        add_action('hook1', ['Acme\\Handler', 'exec']);\n" +
+      "        add_action('hook2', ['Acme\\Handler', 'exec',]);\n" +
+      "        $subscript = $options['Acme\\Handler'];\n" +
+      "        $assoc = ['Acme\\Handler' => 123];\n" +
+      "    }\n" +
+      "}";
+    const mainFile = path.join(tmpDir, "Caller.php");
+    const mapFile = path.join(tmpDir, "map.json");
+    await writeFile(mainFile, source, "utf8");
+
+    execFileSync("php", [transformerPhp, "--dump-map", tmpDir, mapFile, "seed-v4"]);
+    execFileSync("php", [transformerPhp, "--batch", tmpDir, mapFile, "seed-v4", "Caller.php"]);
+
+    const transformed = execFileSync("php", ["-r", `echo file_get_contents(${JSON.stringify(mainFile)});`], { encoding: "utf8" });
+    const lint = execFileSync("php", ["-l", mainFile], { encoding: "utf8" });
+    assert.match(lint, /No syntax errors detected/);
+
+    // Callbacks must be remapped
+    assert.ok(!transformed.includes("['Acme\\Handler', 'exec']"), "Short array callable must be remapped");
+    assert.ok(!transformed.includes("['Acme\\Handler', 'exec',]"), "Short array callable with trailing comma must be remapped");
+
+    // Subscript and associative array keys must NOT be mangled
+    assert.ok(transformed.includes("['Acme\\Handler']"), "Array subscript must be preserved");
+    assert.ok(transformed.includes("['Acme\\Handler' =>"), "Associative array key must be preserved");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test("V4: mixed named bracketed namespaces and global namespace block retain valid syntax and execute", async (t) => {
+  if (!hasPhp()) {
+    t.skip("php is not available on PATH");
+    return;
+  }
+  const transformerPhp = path.resolve(__dirname, "../plan3/transformer.php");
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "v4-mixed-ns-"));
+  try {
+    const source = "<?php\n" +
+      "namespace Alpha { class WorkerA { public function run() { return 'A'; } } }\n" +
+      "namespace Beta { class WorkerB { public function run() { return 'B'; } } }\n" +
+      "namespace {\n" +
+      "    $a = new \\Alpha\\WorkerA();\n" +
+      "    $b = new \\Beta\\WorkerB();\n" +
+      "    echo $a->run() . $b->run();\n" +
+      "}";
+    const mainFile = path.join(tmpDir, "main.php");
+    const mapFile = path.join(tmpDir, "map.json");
+    await writeFile(mainFile, source, "utf8");
+
+    execFileSync("php", [transformerPhp, "--dump-map", tmpDir, mapFile, "seed-v4"]);
+    execFileSync("php", [transformerPhp, "--batch", tmpDir, mapFile, "seed-v4", "main.php"]);
+
+    const lint = execFileSync("php", ["-l", mainFile], { encoding: "utf8" });
+    assert.match(lint, /No syntax errors detected/);
+
+    const exec = execFileSync("php", [mainFile], { encoding: "utf8" });
+    assert.equal(exec.trim(), "AB");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
